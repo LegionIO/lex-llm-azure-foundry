@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 - 2026-04-28
+
+- Publish best-effort `llm.registry` live readiness and configured deployment model availability events using `lex-llm` registry envelopes when transport is already available.
+
 ## 0.1.1 - 2026-04-28
 
 - Require `lex-llm >= 0.1.5` for the shared model offering, canonical alias, readiness, and fleet lane contract used by Azure deployment routing metadata.

@@ -2,6 +2,8 @@
 
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/azure_foundry/provider'
+require 'legion/extensions/llm/azure_foundry/registry_event_builder'
+require 'legion/extensions/llm/azure_foundry/registry_publisher'
 require 'legion/extensions/llm/azure_foundry/version'
 
 module Legion

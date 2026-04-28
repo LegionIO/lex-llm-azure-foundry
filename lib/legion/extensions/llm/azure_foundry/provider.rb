@@ -18,6 +18,8 @@ module Legion
           OPENAI_V1_SURFACE = :openai_v1
 
           class << self
+            attr_writer :registry_publisher
+
             def slug = 'azure_foundry'
             def configuration_requirements = %i[azure_foundry_endpoint]
 
@@ -33,6 +35,10 @@ module Legion
             end
 
             def capabilities = Capabilities
+
+            def registry_publisher
+              @registry_publisher ||= RegistryPublisher.new
+            end
 
             def resolve_model_id(model_id, config: nil)
               deployment = deployment_config(model_id, config:)
@@ -182,21 +188,15 @@ module Legion
           end
 
           def readiness(live: false)
-            health(live: live).merge(local: false, remote: true, endpoints: endpoint_manifest)
+            health(live: live).merge(local: false, remote: true, endpoints: endpoint_manifest).tap do |metadata|
+              self.class.registry_publisher.publish_readiness_async(metadata) if live
+            end
           end
 
           def list_models
-            discover_offerings(live: false).map do |offering|
-              Legion::Extensions::Llm::Model::Info.new(
-                id: offering.model,
-                name: offering.metadata[:canonical_model_alias] || offering.model,
-                provider: :azure_foundry,
-                family: offering.metadata[:model_family],
-                capabilities: offering.capabilities.map(&:to_s),
-                modalities: modalities_for_capabilities(offering.capabilities.map(&:to_s)),
-                metadata: offering.to_h
-              )
-            end
+            models = discover_offerings(live: false).map { |offering| model_info_from_offering(offering) }
+            self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
+            models
           end
 
           def chat(messages, model:, temperature: nil, max_tokens: nil, tools: {}, tool_prefs: nil, params: {}) # rubocop:disable Metrics/ParameterLists
@@ -228,6 +228,19 @@ module Legion
 
           def surface
             (config.azure_foundry_surface || MODEL_INFERENCE_SURFACE).to_sym
+          end
+
+          def model_info_from_offering(offering)
+            capabilities = offering.capabilities.map(&:to_s)
+            Legion::Extensions::Llm::Model::Info.new(
+              id: offering.model,
+              name: offering.metadata[:canonical_model_alias] || offering.model,
+              provider: :azure_foundry,
+              family: offering.metadata[:model_family],
+              capabilities: capabilities,
+              modalities: modalities_for_capabilities(capabilities),
+              metadata: offering.to_h
+            )
           end
 
           def api_version
