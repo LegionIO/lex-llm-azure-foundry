@@ -2,7 +2,6 @@
 
 require 'legion/json'
 require 'legion/logging'
-require 'legion/settings'
 require 'legion/extensions/llm'
 
 module Legion

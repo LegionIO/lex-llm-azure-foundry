@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 - 2026-04-28
+
+- Remove the unused runtime `legion/settings` require while preserving the gemspec dependency.
+
 ## 0.1.2 - 2026-04-28
 
 - Publish best-effort `llm.registry` live readiness and configured deployment model availability events using `lex-llm` registry envelopes when transport is already available.
