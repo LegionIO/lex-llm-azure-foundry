@@ -119,6 +119,8 @@ module Legion
             end
           end
 
+          def stream_usage_supported? = true
+
           def api_base
             endpoint = config.azure_foundry_endpoint.to_s.sub(%r{/*\z}, '')
             return "#{endpoint}/openai/v1" if surface == OPENAI_V1_SURFACE && !endpoint.end_with?('/openai/v1')

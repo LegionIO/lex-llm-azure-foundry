@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.1.4] - 2026-04-30
+
+- Enable stream_usage_supported? for streaming token usage reporting
+
 ## 0.1.3 - 2026-04-28
 
 - Remove the unused runtime `legion/settings` require while preserving the gemspec dependency.
