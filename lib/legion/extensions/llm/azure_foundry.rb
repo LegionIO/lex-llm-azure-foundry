@@ -12,7 +12,7 @@ module Legion
       # Azure AI Foundry provider extension namespace.
       module AzureFoundry
         extend ::Legion::Extensions::Core if ::Legion::Extensions.const_defined?(:Core, false)
-        extend Legion::Logging::Helper
+        extend Legion::Logging::Helper if defined?(Legion::Logging::Helper)
 
         PROVIDER_FAMILY = :azure_foundry
 

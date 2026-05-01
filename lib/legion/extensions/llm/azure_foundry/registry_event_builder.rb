@@ -6,7 +6,7 @@ module Legion
       module AzureFoundry
         # Builds sanitized lex-llm registry envelopes for Azure Foundry provider state.
         class RegistryEventBuilder
-          include Legion::Logging::Helper
+          include Legion::Logging::Helper if defined?(Legion::Logging::Helper)
 
           def readiness(readiness)
             registry_event_class.public_send(
