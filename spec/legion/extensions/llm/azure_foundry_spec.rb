@@ -113,6 +113,64 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
                   estimated_input_characters: 5)
   end
 
+  describe '.discover_instances' do
+    before do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(nil)
+    end
+
+    it 'returns an empty hash when no settings are configured' do
+      expect(described_class.discover_instances).to eq({})
+    end
+
+    it 'discovers a :settings instance when endpoint is present' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ endpoint: 'https://my.azure.com', api_key: 'ak-123' })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:settings]).to include(endpoint: 'https://my.azure.com', api_key: 'ak-123', tier: :cloud)
+    end
+
+    it 'skips the default instance when endpoint is missing' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ api_key: 'ak-123' })
+
+      instances = described_class.discover_instances
+
+      expect(instances).not_to have_key(:settings)
+    end
+
+    it 'discovers named instances from the instances sub-key' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ instances: { prod: { endpoint: 'https://prod.azure.com', api_key: 'ak-prod' } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:prod]).to include(endpoint: 'https://prod.azure.com', api_key: 'ak-prod', tier: :cloud)
+    end
+
+    it 'skips named instances without an endpoint' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ instances: { incomplete: { api_key: 'ak-no-ep' } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances).not_to have_key(:incomplete)
+    end
+
+    it 'excludes the instances sub-key from the default instance config' do
+      cfg = { endpoint: 'https://main.azure.com', instances: { extra: { endpoint: 'https://extra.azure.com' } } }
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry).and_return(cfg)
+
+      expect(described_class.discover_instances[:settings]).not_to have_key(:instances)
+    end
+  end
+
   def default_settings_snapshot
     settings = described_class.default_settings
     {
