@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.6] - 2026-05-01
+
+- Require lex-llm >= 0.1.9 for the shared base contract
+- Replace local RegistryPublisher and RegistryEventBuilder with base classes from lex-llm
+- Delete local transport/ directory (exchange and message classes now live in lex-llm)
+- Remove deprecated Provider.register call; use Configuration.register_provider_options directly
+- Simplify default_settings to flat provider hash (no provider_settings builder)
+- Fix Model::Info construction to use modalities_input/modalities_output keywords
+
 ## [0.1.5] - 2026-04-30
 
 - Audit all rescue blocks for handle_exception compliance across Provider, RegistryPublisher, and RegistryEventBuilder

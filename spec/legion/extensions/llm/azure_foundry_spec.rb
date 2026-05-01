@@ -6,7 +6,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:message) { Legion::Extensions::Llm::Message.new(role: :user, content: 'brief') }
   let(:chat_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gpt-4o-prod', provider: :azure_foundry) }
-  let(:registry_publisher) { instance_double(described_class::RegistryPublisher) }
+  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
   before do
     Legion::Extensions::Llm.configure do |config|
@@ -19,12 +19,19 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
   end
 
-  it 'exposes provider defaults with offline discovery and inherited fleet settings' do
+  it 'exposes provider defaults as a flat settings hash' do
     expect(default_settings_snapshot).to match(default_settings_matcher)
   end
 
-  it 'registers the Legion::Extensions::Llm provider class' do
-    expect(Legion::Extensions::Llm::Provider.resolve(:azure_foundry)).to eq(described_class::Provider)
+  it 'exposes the provider class' do
+    expect(described_class.provider_class).to eq(described_class::Provider)
+  end
+
+  it 'delegates registry_publisher to the base RegistryPublisher' do
+    publisher = described_class.registry_publisher
+
+    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
+    expect(publisher.provider_family).to eq(:azure_foundry)
   end
 
   it 'exposes Azure AI Foundry model inference endpoint helpers' do
@@ -106,6 +113,33 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
                   estimated_input_characters: 5)
   end
 
+  def default_settings_snapshot
+    settings = described_class.default_settings
+    {
+      enabled: settings[:enabled],
+      endpoint: settings[:endpoint],
+      api_version: settings[:api_version],
+      surface: settings[:surface],
+      model_cache_ttl: settings[:model_cache_ttl],
+      tls: settings[:tls],
+      deployments: settings[:deployments],
+      instances: settings[:instances]
+    }
+  end
+
+  def default_settings_matcher
+    {
+      enabled: false,
+      endpoint: nil,
+      api_version: '2024-05-01-preview',
+      surface: nil,
+      model_cache_ttl: 3600,
+      tls: { enabled: false, verify: :peer },
+      deployments: [],
+      instances: {}
+    }
+  end
+
   def configured_deployments
     [
       {
@@ -121,27 +155,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         usage_type: :embedding
       }
     ]
-  end
-
-  def default_settings_snapshot
-    settings = described_class.default_settings
-    {
-      provider_family: settings[:provider_family],
-      fleet: settings[:fleet],
-      live_discovery: settings.dig(:discovery, :live),
-      surface: settings.dig(:instances, :default, :surface),
-      embedding: settings.dig(:instances, :default, :usage, :embedding)
-    }
-  end
-
-  def default_settings_matcher
-    {
-      provider_family: :azure_foundry,
-      fleet: include(:enabled),
-      live_discovery: false,
-      surface: :model_inference,
-      embedding: true
-    }
   end
 
   def offering_snapshot
@@ -197,7 +210,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   end
 
   def capture_registry_events(models, readiness:)
-    publisher = described_class::RegistryPublisher.new
+    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :azure_foundry)
     events = []
     allow(publisher).to receive(:publishing_available?).and_return(true)
     allow(publisher).to receive(:publish_event) { |event| events << event }

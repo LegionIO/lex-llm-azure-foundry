@@ -17,8 +17,6 @@ module Legion
           OPENAI_V1_SURFACE = :openai_v1
 
           class << self
-            attr_writer :registry_publisher
-
             def slug = 'azure_foundry'
             def configuration_requirements = %i[azure_foundry_endpoint]
 
@@ -36,7 +34,7 @@ module Legion
             def capabilities = Capabilities
 
             def registry_publisher
-              @registry_publisher ||= RegistryPublisher.new
+              AzureFoundry.registry_publisher
             end
 
             def resolve_model_id(model_id, config: nil)
@@ -246,13 +244,15 @@ module Legion
 
           def model_info_from_offering(offering)
             capabilities = offering.capabilities.map(&:to_s)
+            modalities = modalities_for_capabilities(capabilities)
             Legion::Extensions::Llm::Model::Info.new(
               id: offering.model,
               name: offering.metadata[:canonical_model_alias] || offering.model,
               provider: :azure_foundry,
               family: offering.metadata[:model_family],
               capabilities: capabilities,
-              modalities: modalities_for_capabilities(capabilities),
+              modalities_input: modalities[:input],
+              modalities_output: modalities[:output],
               metadata: offering.to_h
             )
           end
