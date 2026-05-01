@@ -144,12 +144,14 @@ module Legion
           def health_url = models_url
 
           def discover_offerings(live: false, **filters)
+            log.info { "discovering offerings live=#{live} from #{api_base}" }
             offerings = configured_deployments.filter_map { |deployment| offering_from_config(deployment) }
             return filter_offerings(offerings, **filters) unless live
 
             filter_offerings(offerings, **filters).map do |offering|
               with_live_metadata(offering)
             rescue StandardError => e
+              handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.discover_offerings')
               with_health(offering, ready: false, checked: true, error: e)
             end
           end
@@ -172,43 +174,43 @@ module Legion
           end
 
           def health(live: false)
-            baseline = {
-              provider: :azure_foundry,
-              configured: configured?,
-              ready: configured?,
-              live: live,
-              api_base: api_base,
-              surface: surface
-            }
+            log.info { "checking health live=#{live} at #{api_base}" }
+            baseline = health_baseline(live)
             return baseline.merge(checked: false) unless live
 
             response = connection.get(health_url)
             baseline.merge(checked: true, model_info: response.body)
           rescue StandardError => e
+            handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.health')
             baseline.merge(checked: true, ready: false, error: e.class.name, message: e.message)
           end
 
           def readiness(live: false)
+            log.info { "checking readiness live=#{live} at #{api_base}" }
             health(live: live).merge(local: false, remote: true, endpoints: endpoint_manifest).tap do |metadata|
               self.class.registry_publisher.publish_readiness_async(metadata) if live
             end
           end
 
           def list_models
+            log.info { "listing configured deployment models from #{api_base}" }
             models = discover_offerings(live: false).map { |offering| model_info_from_offering(offering) }
             self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
             models
           end
 
           def chat(messages, model:, temperature: nil, max_tokens: nil, tools: {}, tool_prefs: nil, params: {}) # rubocop:disable Metrics/ParameterLists
+            log.info { "chat request model=#{model} messages=#{messages.size}" }
             complete(messages, tools:, temperature:, model: model_info(model, max_tokens:), params:, tool_prefs:)
           end
 
           def stream(messages, model:, temperature: nil, max_tokens: nil, tools: {}, tool_prefs: nil, params: {}, &) # rubocop:disable Metrics/ParameterLists
+            log.info { "stream request model=#{model} messages=#{messages.size}" }
             complete(messages, tools:, temperature:, model: model_info(model, max_tokens:), params:, tool_prefs:, &)
           end
 
           def embed(text, model:, dimensions: nil, input_type: nil)
+            log.info { "embed request model=#{model}" }
             payload = render_embedding_payload(text, model: model_id(model), dimensions:)
             payload[:input_type] = input_type if input_type
             response = connection.post(embedding_url(model:), payload)
@@ -229,6 +231,17 @@ module Legion
 
           def surface
             (config.azure_foundry_surface || MODEL_INFERENCE_SURFACE).to_sym
+          end
+
+          def health_baseline(live)
+            {
+              provider: :azure_foundry,
+              configured: configured?,
+              ready: configured?,
+              live: live,
+              api_base: api_base,
+              surface: surface
+            }
           end
 
           def model_info_from_offering(offering)

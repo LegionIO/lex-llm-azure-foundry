@@ -6,6 +6,8 @@ module Legion
       module AzureFoundry
         # Builds sanitized lex-llm registry envelopes for Azure Foundry provider state.
         class RegistryEventBuilder
+          include Legion::Logging::Helper
+
           def readiness(readiness)
             registry_event_class.public_send(
               readiness[:ready] ? :available : :unavailable,
@@ -108,6 +110,12 @@ module Legion
           end
 
           def provider_instance
+            configured_node = (::Legion::Settings.dig(:node, :canonical_name) if defined?(::Legion::Settings))
+            value = configured_node.to_s.strip
+            value.empty? ? :azure_foundry : value.to_sym
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true,
+                                operation: 'azure_foundry.registry.provider_instance')
             :azure_foundry
           end
 

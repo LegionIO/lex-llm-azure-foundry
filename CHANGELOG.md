@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.5] - 2026-04-30
+
+- Audit all rescue blocks for handle_exception compliance across Provider, RegistryPublisher, and RegistryEventBuilder
+- Add Legion::Logging::Helper to AzureFoundry module, RegistryPublisher, and RegistryEventBuilder
+- Add info-level action logging for discover_offerings, health, readiness, list_models, chat, stream, embed, and registry publish
+- Remove custom log_publish_failure in favour of standard handle_exception
+- Update README to reflect current architecture, file map, and observability
+
 ## [0.1.4] - 2026-04-30
 
 - Enable stream_usage_supported? for streaming token usage reporting

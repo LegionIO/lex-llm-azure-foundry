@@ -13,11 +13,49 @@ Load it with `require 'legion/extensions/llm/azure_foundry'`.
 - Azure AI Foundry model inference embeddings through `POST /models/embeddings?api-version=...`
 - Azure AI Foundry model info health check through `GET /models/info?api-version=...` when `live: true`
 - Azure OpenAI v1-compatible endpoint support through `/openai/v1/chat/completions` and `/openai/v1/embeddings`
-- deployment-name-preserving routing offerings for hosted Azure deployments
-- explicit `model_family` and `canonical_model_alias` metadata for deployments whose base model cannot be proven from Azure metadata
-- offline-first discovery from configured deployments
-- shared OpenAI-compatible request and response mapping via `Legion::Extensions::Llm::Provider::OpenAICompatible`
-- conservative token-counting metadata when no portable Azure token-counting REST endpoint is configured
+- Deployment-name-preserving routing offerings for hosted Azure deployments
+- Explicit `model_family` and `canonical_model_alias` metadata for deployments whose base model cannot be proven from Azure metadata
+- Offline-first discovery from configured deployments
+- Shared OpenAI-compatible request and response mapping via `Legion::Extensions::Llm::Provider::OpenAICompatible`
+- Conservative token-counting metadata when no portable Azure token-counting REST endpoint is configured
+- Best-effort `llm.registry` event publishing for readiness and model availability via AMQP when transport is available
+
+## Architecture
+
+```
+Legion::Extensions::Llm::AzureFoundry
+├── Provider              # Azure AI Foundry and Azure OpenAI hosted provider surface
+│   └── Capabilities      # Capability predicates inferred from deployment metadata and model naming
+├── RegistryPublisher     # Best-effort async publisher for llm.registry availability events
+├── RegistryEventBuilder  # Builds sanitized lex-llm registry envelopes for provider state
+├── Transport/
+│   ├── Messages::RegistryEvent  # AMQP message for llm.registry events
+│   └── Exchanges::LlmRegistry  # Topic exchange for provider availability events
+└── VERSION
+```
+
+## File Map
+
+| Path | Purpose |
+|------|---------|
+| `lib/legion/extensions/llm/azure_foundry.rb` | Entry point, provider registration, default settings |
+| `lib/legion/extensions/llm/azure_foundry/provider.rb` | Provider implementation with chat, stream, embed, health, readiness, discovery |
+| `lib/legion/extensions/llm/azure_foundry/registry_publisher.rb` | Async registry event publishing with transport guards |
+| `lib/legion/extensions/llm/azure_foundry/registry_event_builder.rb` | Sanitized registry envelope construction |
+| `lib/legion/extensions/llm/azure_foundry/transport/messages/registry_event.rb` | AMQP message class for registry events |
+| `lib/legion/extensions/llm/azure_foundry/transport/exchanges/llm_registry.rb` | Topic exchange definition for llm.registry |
+| `lib/legion/extensions/llm/azure_foundry/version.rb` | `VERSION` constant |
+
+## Observability
+
+Every class and module uses `Legion::Logging::Helper`:
+
+- **AzureFoundry** module: `extend Legion::Logging::Helper`
+- **Provider**: inherits `include Legion::Logging::Helper` from `Legion::Extensions::Llm::Provider`
+- **RegistryPublisher**: `include Legion::Logging::Helper`
+- **RegistryEventBuilder**: `include Legion::Logging::Helper`
+
+All rescue blocks call `handle_exception(e, level:, handled:, operation:)` for structured exception reporting. Key actions emit info-level log lines including discover_offerings, health checks, readiness, model listing, chat, stream, embed, and registry publish operations.
 
 ## API Contract
 
@@ -97,6 +135,8 @@ provider = Legion::Extensions::Llm::AzureFoundry.provider_class.new(Legion::Exte
 provider.discover_offerings(live: false)
 provider.offering_for(model: "gpt-4o-prod", model_family: :openai, canonical_model_alias: "gpt-4o")
 provider.health(live: false)
+provider.readiness(live: false)
+provider.list_models
 provider.chat(messages, model: "gpt-4o-prod")
 provider.stream(messages, model: "gpt-4o-prod") { |chunk| puts chunk.content }
 provider.embed(["hello"], model: "embedding-prod")
