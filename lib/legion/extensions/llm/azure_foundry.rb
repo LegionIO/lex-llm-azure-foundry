@@ -113,5 +113,3 @@ module Legion
     end
   end
 end
-
-Legion::Extensions::Llm::AzureFoundry.register_discovered_instances
