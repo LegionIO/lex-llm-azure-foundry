@@ -19,7 +19,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
   end
 
-  it 'exposes provider defaults as a flat settings hash' do
+  it 'exposes provider defaults through the shared provider settings shape' do
     expect(default_settings_snapshot).to match(default_settings_matcher)
   end
 
@@ -108,7 +108,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   end
 
   it 'returns a conservative token counting placeholder' do
-    expect(provider.count_tokens([message], model: 'gpt-4o-prod'))
+    expect(provider.count_tokens(messages: [message], model: 'gpt-4o-prod'))
       .to include(provider_family: :azure_foundry, model: 'gpt-4o-prod', supported: false,
                   estimated_input_characters: 5)
   end
@@ -122,14 +122,17 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(described_class.discover_instances).to eq({})
     end
 
-    it 'discovers a :settings instance when endpoint is present' do
+    it 'discovers a :settings instance when endpoint is present' do # rubocop:disable RSpec/ExampleLength
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ endpoint: 'https://my.azure.com', api_key: 'ak-123' })
 
       instances = described_class.discover_instances
 
-      expect(instances[:settings]).to include(endpoint: 'https://my.azure.com', api_key: 'ak-123', tier: :cloud)
+      expect(instances[:settings]).to include(azure_foundry_endpoint: 'https://my.azure.com',
+                                              azure_foundry_api_key: 'ak-123',
+                                              tier: :cloud)
+      expect(instances[:settings]).not_to have_key(:endpoint)
     end
 
     it 'skips the default instance when endpoint is missing' do
@@ -142,14 +145,30 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(instances).not_to have_key(:settings)
     end
 
-    it 'discovers named instances from the instances sub-key' do
+    it 'discovers named instances from the instances sub-key' do # rubocop:disable RSpec/ExampleLength
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ instances: { prod: { endpoint: 'https://prod.azure.com', api_key: 'ak-prod' } } })
 
       instances = described_class.discover_instances
 
-      expect(instances[:prod]).to include(endpoint: 'https://prod.azure.com', api_key: 'ak-prod', tier: :cloud)
+      expect(instances[:prod]).to include(azure_foundry_endpoint: 'https://prod.azure.com',
+                                          azure_foundry_api_key: 'ak-prod',
+                                          tier: :cloud)
+    end
+
+    it 'normalizes endpoint aliases and deployment settings' do # rubocop:disable RSpec/ExampleLength
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ base_url: 'https://openai.azure.com', api_key: 'ak-123',
+                      api_version: '2024-05-01-preview', deployments: ['gpt-4o'] })
+
+      expect(described_class.discover_instances[:settings]).to include(
+        azure_foundry_endpoint: 'https://openai.azure.com',
+        azure_foundry_api_key: 'ak-123',
+        azure_foundry_api_version: '2024-05-01-preview',
+        azure_foundry_deployments: ['gpt-4o']
+      )
     end
 
     it 'skips named instances without an endpoint' do
@@ -173,28 +192,29 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   def default_settings_snapshot
     settings = described_class.default_settings
+    instance = settings.dig(:instances, :default)
     {
       enabled: settings[:enabled],
-      endpoint: settings[:endpoint],
-      api_version: settings[:api_version],
-      surface: settings[:surface],
-      model_cache_ttl: settings[:model_cache_ttl],
-      tls: settings[:tls],
-      deployments: settings[:deployments],
-      instances: settings[:instances]
+      provider_family: settings[:provider_family],
+      endpoint: instance[:endpoint],
+      api_version: instance.dig(:provider, :api_version),
+      surface: instance.dig(:provider, :surface),
+      deployments: instance.dig(:provider, :deployments),
+      fleet: instance[:fleet],
+      usage: instance[:usage]
     }
   end
 
   def default_settings_matcher
     {
-      enabled: false,
+      enabled: true,
+      provider_family: :azure_foundry,
       endpoint: nil,
       api_version: '2024-05-01-preview',
       surface: nil,
-      model_cache_ttl: 3600,
-      tls: { enabled: false, verify: :peer },
       deployments: [],
-      instances: {}
+      fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed]),
+      usage: hash_including(inference: true, embedding: true)
     }
   end
 

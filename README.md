@@ -2,7 +2,7 @@
 
 LegionIO LLM provider extension for Azure AI Foundry Models and Azure OpenAI hosted deployments.
 
-This gem lives under `Legion::Extensions::Llm::AzureFoundry` and depends on `lex-llm >= 0.1.5` for shared provider-neutral routing, fleet, model-offering, readiness, canonical-alias, and schema primitives.
+This gem lives under `Legion::Extensions::Llm::AzureFoundry` and depends on `lex-llm >= 0.4.0` for shared provider-neutral routing, response normalization, fleet envelopes, model-offering, readiness, canonical-alias, and schema primitives.
 
 Load it with `require 'legion/extensions/llm/azure_foundry'`.
 
@@ -91,6 +91,25 @@ Legion::Extensions::Llm::AzureFoundry.default_settings
 #     }
 #   }
 # }
+```
+
+## Fleet Responder
+
+Provider instances can opt in to consuming Legion LLM fleet requests. The provider-owned fleet actor only starts when at least one configured instance enables `respond_to_requests`.
+
+```yaml
+extensions:
+  llm:
+    azure_foundry:
+      instances:
+        local:
+          fleet:
+            enabled: true
+            respond_to_requests: true
+            capabilities:
+              - chat
+              - stream_chat
+              - embed
 ```
 
 ## Configuration
