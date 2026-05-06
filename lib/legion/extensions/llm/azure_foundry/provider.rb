@@ -238,9 +238,8 @@ module Legion
           def count_tokens(
             messages:,
             model:,
-            params: {}
+            **_provider_options
           )
-            _ = params
             {
               provider_family: :azure_foundry,
               model: model_id(model),
@@ -320,8 +319,8 @@ module Legion
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :azure_foundry,
               instance_id: instance_id,
-              transport: :http,
-              tier: :frontier,
+              transport: configured_transport(:http),
+              tier: configured_tier(:frontier),
               model: model,
               usage_type: usage_type.to_sym,
               capabilities: capabilities,
@@ -331,6 +330,14 @@ module Legion
                 requires_explicit_model_metadata: canonical_model_alias.nil? || model_family.nil?
               ).compact
             )
+          end
+
+          def configured_transport(default)
+            config.respond_to?(:transport) ? config.transport : default
+          end
+
+          def configured_tier(default)
+            config.respond_to?(:tier) ? config.tier : default
           end
 
           def with_live_metadata(offering)

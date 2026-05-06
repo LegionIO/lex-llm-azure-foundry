@@ -60,6 +60,10 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(offering.metadata).to include(model_family: :mistral, requires_explicit_model_metadata: true)
   end
 
+  it 'uses provider instance transport and tier in offerings' do
+    expect(configured_transport_offering.to_h).to include(transport: :rabbitmq, tier: :fleet)
+  end
+
   it 'resolves configured aliases back to deployment names' do
     model = described_class::Provider.resolve_model_id('gpt-4o', config: Legion::Extensions::Llm.config)
 
@@ -271,6 +275,16 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       provider.embedding_url(model: 'embedding-prod'),
       provider.health_url
     ]
+  end
+
+  def configured_transport_offering
+    described_class::Provider.new(
+      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
+      azure_foundry_api_key: 'test-key',
+      azure_foundry_deployments: configured_deployments,
+      transport: :rabbitmq,
+      tier: :fleet
+    ).offering_for(model: 'private-mistral-eastus', model_family: :mistral)
   end
 
   def expected_model_inference_endpoints
