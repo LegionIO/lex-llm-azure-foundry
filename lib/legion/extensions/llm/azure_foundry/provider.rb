@@ -197,25 +197,49 @@ module Legion
             models
           end
 
-          def chat(messages, model:, temperature: nil, max_tokens: nil, tools: {}, tool_prefs: nil, params: {}) # rubocop:disable Metrics/ParameterLists
+          def chat(
+            messages:,
+            model:,
+            **options
+          )
             log.info { "chat request model=#{model} messages=#{messages.size}" }
-            complete(messages, tools:, temperature:, model: model_info(model, max_tokens:), params:, tool_prefs:)
+            complete(messages, tools: options.fetch(:tools, {}), temperature: options[:temperature],
+                               model: model_info(model, max_tokens: options[:max_tokens]),
+                               params: options.fetch(:params, {}), tool_prefs: options[:tool_prefs])
           end
 
-          def stream(messages, model:, temperature: nil, max_tokens: nil, tools: {}, tool_prefs: nil, params: {}, &) # rubocop:disable Metrics/ParameterLists
+          def stream(
+            messages:,
+            model:,
+            **options,
+            &
+          )
             log.info { "stream request model=#{model} messages=#{messages.size}" }
-            complete(messages, tools:, temperature:, model: model_info(model, max_tokens:), params:, tool_prefs:, &)
+            complete(messages, tools: options.fetch(:tools, {}), temperature: options[:temperature],
+                               model: model_info(model, max_tokens: options[:max_tokens]),
+                               params: options.fetch(:params, {}), tool_prefs: options[:tool_prefs], &)
           end
 
-          def embed(text, model:, dimensions: nil, input_type: nil)
+          def embed(
+            text:,
+            model:,
+            **options
+          )
             log.info { "embed request model=#{model}" }
-            payload = render_embedding_payload(text, model: model_id(model), dimensions:)
-            payload[:input_type] = input_type if input_type
+            payload = Utils.deep_merge(
+              render_embedding_payload(text, model: model_id(model), dimensions: options[:dimensions]),
+              options.fetch(:params, {})
+            )
+            payload[:input_type] = options[:input_type] if options[:input_type]
             response = connection.post(embedding_url(model:), payload)
             parse_embedding_response(response, model: model_id(model), text:)
           end
 
-          def count_tokens(messages, model:, **)
+          def count_tokens(
+            messages:,
+            model:,
+            **_provider_options
+          )
             {
               provider_family: :azure_foundry,
               model: model_id(model),
@@ -295,8 +319,8 @@ module Legion
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :azure_foundry,
               instance_id: instance_id,
-              transport: :http,
-              tier: :frontier,
+              transport: configured_transport(:http),
+              tier: configured_tier(:frontier),
               model: model,
               usage_type: usage_type.to_sym,
               capabilities: capabilities,
@@ -306,6 +330,14 @@ module Legion
                 requires_explicit_model_metadata: canonical_model_alias.nil? || model_family.nil?
               ).compact
             )
+          end
+
+          def configured_transport(default)
+            config.respond_to?(:transport) ? config.transport : default
+          end
+
+          def configured_tier(default)
+            config.respond_to?(:tier) ? config.tier : default
           end
 
           def with_live_metadata(offering)

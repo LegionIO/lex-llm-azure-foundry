@@ -16,21 +16,33 @@ module Legion
         PROVIDER_FAMILY = :azure_foundry
 
         def self.default_settings
-          {
-            enabled: false,
-            default_model: nil,
-            endpoint: nil,
-            api_key: nil,
-            bearer_token: nil,
-            api_version: '2024-05-01-preview',
-            surface: nil,
-            deployments: [],
-            model_whitelist: [],
-            model_blacklist: [],
-            model_cache_ttl: 3600,
-            tls: { enabled: false, verify: :peer },
-            instances: {}
-          }
+          ::Legion::Extensions::Llm.provider_settings(
+            family: PROVIDER_FAMILY,
+            instance: {
+              endpoint: nil,
+              tier: :frontier,
+              transport: :http,
+              credentials: {
+                api_key: nil,
+                bearer_token: nil
+              },
+              provider: {
+                api_version: Provider::DEFAULT_API_VERSION,
+                surface: nil,
+                deployments: []
+              },
+              usage: { inference: true, embedding: true, image: false },
+              limits: { concurrency: 4 },
+              fleet: {
+                enabled: false,
+                respond_to_requests: false,
+                capabilities: %i[chat stream_chat embed],
+                lanes: [],
+                concurrency: 4,
+                queue_suffix: nil
+              }
+            }
+          )
         end
 
         def self.provider_class
@@ -48,14 +60,15 @@ module Legion
           instances
         end
 
-        def self.discover_default_instance(instances)
+        def self.discover_default_instance(instances) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
           cfg = CredentialSources.setting(:extensions, :llm, :azure_foundry)
           return unless cfg.is_a?(Hash)
 
-          endpoint = cfg[:endpoint] || cfg['endpoint']
+          endpoint = cfg[:endpoint] || cfg['endpoint'] || cfg[:base_url] || cfg['base_url'] || cfg[:api_base] ||
+                     cfg['api_base']
           return if endpoint.nil? || endpoint.to_s.strip.empty?
 
-          instances[:settings] = cfg.except(:instances, 'instances').merge(tier: :cloud)
+          instances[:settings] = normalize_instance_config(cfg).merge(tier: :cloud)
         end
 
         def self.discover_named_instances(instances)
@@ -68,21 +81,35 @@ module Legion
           named.each { |name, config| add_named_instance(instances, name, config) }
         end
 
-        def self.add_named_instance(instances, name, config)
+        def self.add_named_instance(instances, name, config) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
           return unless config.is_a?(Hash)
 
-          endpoint = config[:endpoint] || config['endpoint']
+          endpoint = config[:endpoint] || config['endpoint'] || config[:base_url] || config['base_url'] ||
+                     config[:api_base] || config['api_base']
           return if endpoint.nil? || endpoint.to_s.strip.empty?
 
-          instances[name.to_sym] = config.merge(tier: :cloud)
+          instances[name.to_sym] = normalize_instance_config(config).merge(tier: :cloud)
         end
 
-        private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance
+        def self.normalize_instance_config(config) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+          normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+          normalized[:azure_foundry_endpoint] ||= normalized.delete(:endpoint)
+          normalized[:azure_foundry_endpoint] ||= normalized.delete(:base_url)
+          normalized[:azure_foundry_endpoint] ||= normalized.delete(:api_base)
+          normalized[:azure_foundry_api_key] ||= normalized.delete(:api_key)
+          normalized[:azure_foundry_bearer_token] ||= normalized.delete(:bearer_token)
+          normalized[:azure_foundry_api_version] ||= normalized.delete(:api_version)
+          normalized[:azure_foundry_surface] ||= normalized.delete(:surface)
+          normalized[:azure_foundry_deployments] ||= normalized.delete(:deployments)
+          normalized.compact.except(:instances)
+        end
 
-        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
+        private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
+                             :normalize_instance_config
+
+        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options) if
+          Legion::Extensions::Llm::Configuration.respond_to?(:register_provider_options)
       end
     end
   end
 end
-
-Legion::Extensions::Llm::AzureFoundry.register_discovered_instances
