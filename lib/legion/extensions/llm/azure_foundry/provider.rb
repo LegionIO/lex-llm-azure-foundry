@@ -145,18 +145,10 @@ module Legion
 
           def discover_offerings(live: false, **filters)
             log.info { "discovering offerings live=#{live} from #{api_base}" }
-            offerings = configured_deployments.filter_map do |deployment|
-              offering = offering_from_config(deployment)
-              next unless offering
+            offerings = filter_offerings(allowed_offerings, **filters)
+            return offerings unless live
 
-              model_id = offering.respond_to?(:model) ? offering.model : (offering[:model] || deployment[:model])
-              next unless model_allowed?(model_id.to_s)
-
-              offering
-            end
-            return filter_offerings(offerings, **filters) unless live
-
-            filter_offerings(offerings, **filters).map do |offering|
+            offerings.map do |offering|
               with_live_metadata(offering)
             rescue StandardError => e
               handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.discover_offerings')
@@ -308,6 +300,18 @@ module Legion
 
           def configured_deployments
             self.class.normalize_deployments(config.azure_foundry_deployments)
+          end
+
+          def allowed_offerings
+            configured_deployments.filter_map do |deployment|
+              offering = offering_from_config(deployment)
+              next unless offering
+
+              mid = offering.respond_to?(:model) ? offering.model : (offering[:model] || deployment[:model])
+              next unless model_allowed?(mid.to_s)
+
+              offering
+            end
           end
 
           def offering_from_config(deployment)
