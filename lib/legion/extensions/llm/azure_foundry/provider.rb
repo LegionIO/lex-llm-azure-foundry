@@ -18,6 +18,8 @@ module Legion
 
           class << self
             def slug = 'azure_foundry'
+            def default_transport = :http
+            def default_tier = :cloud
             def configuration_requirements = %i[azure_foundry_endpoint]
 
             def configuration_options
@@ -128,10 +130,10 @@ module Legion
           end
 
           def headers
-            {
+            identity_headers.merge({
               'api-key' => config.azure_foundry_api_key,
               'Authorization' => bearer_header
-            }.compact
+            }.compact)
           end
 
           def completion_url = path_for('chat/completions')
@@ -143,10 +145,10 @@ module Legion
 
           def discover_offerings(live: false, **filters)
             log.info { "discovering offerings live=#{live} from #{api_base}" }
-            offerings = configured_deployments.filter_map { |deployment| offering_from_config(deployment) }
-            return filter_offerings(offerings, **filters) unless live
+            offerings = filter_offerings(allowed_offerings, **filters)
+            return offerings unless live
 
-            filter_offerings(offerings, **filters).map do |offering|
+            offerings.map do |offering|
               with_live_metadata(offering)
             rescue StandardError => e
               handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.discover_offerings')
@@ -300,6 +302,18 @@ module Legion
             self.class.normalize_deployments(config.azure_foundry_deployments)
           end
 
+          def allowed_offerings
+            configured_deployments.filter_map do |deployment|
+              offering = offering_from_config(deployment)
+              next unless offering
+
+              mid = offering.respond_to?(:model) ? offering.model : (offering[:model] || deployment[:model])
+              next unless model_allowed?(mid.to_s)
+
+              offering
+            end
+          end
+
           def offering_from_config(deployment)
             deployment_name = value_for(deployment, :deployment) || value_for(deployment, :model)
             return nil if deployment_name.to_s.empty?
@@ -319,8 +333,8 @@ module Legion
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :azure_foundry,
               instance_id: instance_id,
-              transport: configured_transport(:http),
-              tier: configured_tier(:frontier),
+              transport: offering_transport,
+              tier: offering_tier,
               model: model,
               usage_type: usage_type.to_sym,
               capabilities: capabilities,
@@ -330,14 +344,6 @@ module Legion
                 requires_explicit_model_metadata: canonical_model_alias.nil? || model_family.nil?
               ).compact
             )
-          end
-
-          def configured_transport(default)
-            config.respond_to?(:transport) ? config.transport : default
-          end
-
-          def configured_tier(default)
-            config.respond_to?(:tier) ? config.tier : default
           end
 
           def with_live_metadata(offering)

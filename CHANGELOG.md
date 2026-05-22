@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.6 - 2026-05-21
+
+- Add `default_transport`/`default_tier` class declarations, remove `configured_transport`/`configured_tier`
+- Add `model_allowed?` filtering in `discover_offerings`
+- Default tier set to :cloud
+- Identity headers included via base provider
+
+
 ## 0.2.5 - 2026-05-06
 
 - Load provider-owned fleet actors through the LegionIO subscription base and the canonical Azure Foundry provider root.
