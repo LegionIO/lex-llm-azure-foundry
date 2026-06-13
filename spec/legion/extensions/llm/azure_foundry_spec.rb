@@ -217,7 +217,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       api_version: '2024-05-01-preview',
       surface: nil,
       deployments: [],
-      fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed]),
+      fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed tools]),
       usage: hash_including(inference: true, embedding: true)
     }
   end
