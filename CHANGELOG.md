@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.8 - 2026-06-13
+
+- **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
+- **Dependency bump** — Require `lex-llm >= 0.5.0` for canonical types support.
+- **Capabilities** — Add canonical `:tools` to capability declarations.
+- 26 examples, 0 failures; 13 files, 0 rubocop offenses.
+
 ## 0.2.7 - 2026-06-02
 
 - Add per-provider scoped discovery refresh actor

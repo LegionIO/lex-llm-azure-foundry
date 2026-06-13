@@ -36,7 +36,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed],
+                capabilities: %i[chat stream_chat embed tools],
                 lanes: [],
                 concurrency: 4,
                 queue_suffix: nil
