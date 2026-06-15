@@ -256,7 +256,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     {
       provider_family: :azure_foundry,
       chat_metadata: include(model_family: :openai, canonical_model_alias: 'gpt-4o'),
-      chat_capabilities: include(:streaming, :function_calling, :vision),
+      chat_capabilities: include(:streaming, :tools, :vision),
       embedding_metadata: include(model_family: :openai, canonical_model_alias: 'text-embedding-3-small'),
       embedding_usage_type: :embedding
     }

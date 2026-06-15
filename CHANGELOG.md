@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.9 - 2026-06-15
+
+- **CapabilityPolicy integration** — Streaming from `:provider_envelope`; deployment metadata as `:model_metadata`. Settings overrides at provider/instance/model level supported.
+
 ## 0.2.8 - 2026-06-13
 
 - **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
