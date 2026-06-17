@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.10 - 2026-06-16
+
+- Dependency updates and code quality improvements.
+
+## 0.2.9 - 2026-06-15
+
+- **CapabilityPolicy integration** — Streaming from `:provider_envelope`; deployment metadata as `:model_metadata`. Settings overrides at provider/instance/model level supported.
+
+## 0.2.8 - 2026-06-13
+
+- **Gemfile cleanup** — Remove local path overrides; dependencies resolve from gemspec via rubygems.
+- **Dependency bump** — Require `lex-llm >= 0.5.0` for canonical types support.
+- **Capabilities** — Add canonical `:tools` to capability declarations.
+- 26 examples, 0 failures; 13 files, 0 rubocop offenses.
+
 ## 0.2.7 - 2026-06-02
 
 - Add per-provider scoped discovery refresh actor

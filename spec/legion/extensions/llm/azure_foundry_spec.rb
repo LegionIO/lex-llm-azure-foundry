@@ -217,7 +217,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       api_version: '2024-05-01-preview',
       surface: nil,
       deployments: [],
-      fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed]),
+      fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed tools]),
       usage: hash_including(inference: true, embedding: true)
     }
   end
@@ -256,7 +256,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     {
       provider_family: :azure_foundry,
       chat_metadata: include(model_family: :openai, canonical_model_alias: 'gpt-4o'),
-      chat_capabilities: include(:streaming, :function_calling, :vision),
+      chat_capabilities: include(:streaming, :tools, :vision),
       embedding_metadata: include(model_family: :openai, canonical_model_alias: 'text-embedding-3-small'),
       embedding_usage_type: :embedding
     }

@@ -329,7 +329,7 @@ module Legion
           end
 
           def build_offering(model:, model_family:, usage_type:, instance_id:, canonical_model_alias:, metadata:) # rubocop:disable Metrics/ParameterLists
-            capabilities = capabilities_for(model, usage_type)
+            policy = resolve_capability_policy(model, usage_type)
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :azure_foundry,
               instance_id: instance_id,
@@ -337,7 +337,8 @@ module Legion
               tier: offering_tier,
               model: model,
               usage_type: usage_type.to_sym,
-              capabilities: capabilities,
+              capabilities: policy[:capabilities],
+              capability_sources: policy[:sources],
               metadata: metadata.merge(
                 model_family: model_family,
                 canonical_model_alias: canonical_model_alias,
@@ -371,6 +372,65 @@ module Legion
             return {} unless deployment
 
             deployment.to_h.transform_keys(&:to_sym).except(:deployment, :model_family, :usage_type)
+          end
+
+          def resolve_capability_policy(model, usage_type)
+            if usage_type.to_sym == :embedding
+              return { capabilities: %i[embeddings], sources: { embeddings: { value: true, source: :model_metadata } } }
+            end
+
+            real_caps = real_capabilities_for(model)
+            provider_cfg = provider_level_config
+            instance_cfg = instance_level_config
+            model_cfg = model_config_for(model)
+
+            Legion::Extensions::Llm::CapabilityPolicy.resolve(
+              real: real_caps,
+              provider_catalog: {},
+              probe: {},
+              provider_envelope: { streaming: true },
+              provider_config: provider_cfg,
+              instance_config: instance_cfg,
+              model_config: model_cfg
+            )
+          end
+
+          def real_capabilities_for(model)
+            caps = {}
+            caps[:streaming] = true if Capabilities.streaming?(model)
+            caps[:tools] = true if Capabilities.functions?(model)
+            caps[:vision] = true if Capabilities.vision?(model)
+            caps
+          end
+
+          def instance_level_config
+            if config.respond_to?(:to_h)
+              config.to_h
+            elsif config.respond_to?(:instance_variable_get)
+              data = config.instance_variable_get(:@data)
+              data.is_a?(Hash) ? data : {}
+            else
+              {}
+            end
+          end
+
+          def provider_level_config
+            cfg = Legion::Extensions::Llm::CredentialSources.setting(:extensions, :llm, :azure_foundry)
+            return {} unless cfg.is_a?(Hash)
+
+            cfg.except(:instances, 'instances')
+          rescue StandardError => e
+            handle_exception(e, level: :debug, handled: true, operation: 'azure_foundry.provider_level_config')
+            {}
+          end
+
+          def model_config_for(model)
+            provider_cfg = provider_level_config
+            models = provider_cfg[:models] || provider_cfg['models']
+            return {} unless models.is_a?(Hash)
+
+            model_id_str = Capabilities.model_id(model)
+            models[model_id_str.to_sym] || models[model_id_str] || {}
           end
 
           def capabilities_for(model, usage_type)

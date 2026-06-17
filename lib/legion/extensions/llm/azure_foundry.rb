@@ -3,6 +3,7 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
+require_relative 'azure_foundry/actors/discovery_refresh'
 
 module Legion
   module Extensions
@@ -36,10 +37,7 @@ module Legion
               fleet: {
                 enabled: false,
                 respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed],
-                lanes: [],
-                concurrency: 4,
-                queue_suffix: nil
+                capabilities: %i[chat stream_chat embed tools]
               }
             }
           )
@@ -107,8 +105,7 @@ module Legion
         private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
                              :normalize_instance_config
 
-        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options) if
-          Legion::Extensions::Llm::Configuration.respond_to?(:register_provider_options)
+        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end
     end
   end
