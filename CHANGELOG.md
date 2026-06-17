@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.10 - 2026-06-16
+
+- Dependency updates and code quality improvements.
+
 ## 0.2.9 - 2026-06-15
 
 - **CapabilityPolicy integration** — Streaming from `:provider_envelope`; deployment metadata as `:model_metadata`. Settings overrides at provider/instance/model level supported.
