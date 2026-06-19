@@ -420,7 +420,7 @@ module Legion
 
             cfg.except(:instances, 'instances')
           rescue StandardError => e
-            handle_exception(e, level: :debug, handled: true, operation: 'azure_foundry.provider_level_config')
+            handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.provider_level_config')
             {}
           end
 
