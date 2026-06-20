@@ -66,7 +66,7 @@ module Legion
                      cfg['api_base']
           return if endpoint.nil? || endpoint.to_s.strip.empty?
 
-          instances[:settings] = normalize_instance_config(cfg).merge(tier: :cloud)
+          instances[:settings] = normalize_instance_config(cfg).merge(tier: cfg[:tier] || cfg['tier'] || :cloud)
         end
 
         def self.discover_named_instances(instances)
@@ -86,7 +86,8 @@ module Legion
                      config[:api_base] || config['api_base']
           return if endpoint.nil? || endpoint.to_s.strip.empty?
 
-          instances[name.to_sym] = normalize_instance_config(config).merge(tier: :cloud)
+          instances[name.to_sym] =
+            normalize_instance_config(config).merge(tier: config[:tier] || config['tier'] || :cloud)
         end
 
         def self.normalize_instance_config(config) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity

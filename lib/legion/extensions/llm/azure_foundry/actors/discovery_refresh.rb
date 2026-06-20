@@ -28,10 +28,9 @@ module Legion
               include Legion::Extensions::Llm::Inventory::ScopedRefresher
             end
 
-            REFRESH_INTERVAL = 1800
             EMBED_TYPES = %i[embed embedding].freeze
 
-            def self.every_seconds = 60
+            def self.every_seconds = 3600
 
             def runner_class    = self.class
             def runner_function = 'manual'
@@ -41,9 +40,9 @@ module Legion
             def generate_task?  = false
 
             def time
-              return REFRESH_INTERVAL unless defined?(Legion::Settings)
+              return self.class.every_seconds unless defined?(Legion::Settings)
 
-              Legion::Settings.dig(:extensions, :llm, :azure_foundry, :discovery_interval) || REFRESH_INTERVAL
+              Legion::Settings.dig(:extensions, :llm, :azure_foundry, :discovery_interval) || self.class.every_seconds
             end
 
             def manual # rubocop:disable Metrics/CyclomaticComplexity

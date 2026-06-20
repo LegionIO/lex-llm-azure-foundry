@@ -60,8 +60,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(offering.metadata).to include(model_family: :mistral, requires_explicit_model_metadata: true)
   end
 
-  it 'uses provider instance transport and tier in offerings' do
-    expect(configured_transport_offering.to_h).to include(transport: :rabbitmq, tier: :fleet)
+  it 'uses provider instance transport, tier, and instance id in offerings' do
+    expect(configured_transport_offering.to_h).to include(transport: :rabbitmq, tier: :fleet, instance_id: :eastus)
   end
 
   it 'resolves configured aliases back to deployment names' do
@@ -71,7 +71,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   end
 
   it 'reports non-live health without network calls' do
-    expect(provider.health(live: false)).to include(provider: :azure_foundry, ready: true, checked: false)
+    expect(offline_health).to include(offline_health_matcher)
   end
 
   it 'publishes live readiness metadata asynchronously through the registry publisher' do
@@ -139,6 +139,16 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(instances[:settings]).not_to have_key(:endpoint)
     end
 
+    it 'preserves an explicit tier for the default discovered instance' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ endpoint: 'https://my.azure.com', api_key: 'ak-123', tier: :private })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:settings]).to include(tier: :private)
+    end
+
     it 'skips the default instance when endpoint is missing' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
@@ -159,6 +169,16 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(instances[:prod]).to include(azure_foundry_endpoint: 'https://prod.azure.com',
                                           azure_foundry_api_key: 'ak-prod',
                                           tier: :cloud)
+    end
+
+    it 'preserves an explicit tier for named instances' do
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ instances: { prod: { endpoint: 'https://prod.azure.com', api_key: 'ak-prod', tier: :fleet } } })
+
+      instances = described_class.discover_instances
+
+      expect(instances[:prod]).to include(tier: :fleet)
     end
 
     it 'normalizes endpoint aliases and deployment settings' do # rubocop:disable RSpec/ExampleLength
@@ -277,11 +297,27 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     ]
   end
 
+  def offline_health
+    provider.health(live: false)
+  end
+
+  def offline_health_matcher
+    {
+      provider: :azure_foundry,
+      instance_id: :default,
+      ready: true,
+      checked: false,
+      status: 'healthy',
+      circuit_state: 'closed'
+    }
+  end
+
   def configured_transport_offering
     described_class::Provider.new(
       azure_foundry_endpoint: 'https://example.services.ai.azure.com',
       azure_foundry_api_key: 'test-key',
       azure_foundry_deployments: configured_deployments,
+      instance_id: :eastus,
       transport: :rabbitmq,
       tier: :fleet
     ).offering_for(model: 'private-mistral-eastus', model_family: :mistral)

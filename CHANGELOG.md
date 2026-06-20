@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.12] - 2026-06-20
+
+### Changed
+- Align Azure Foundry instance discovery with the shared `lex-llm` contract by preserving explicit tier overrides while defaulting unconfigured instances to `:cloud`.
+- Restore offline deployment-backed offering discovery and carry the configured provider instance id through Azure offering metadata.
+- Normalize Azure Foundry capability and health metadata to the current shared offering contract.
+
 ## [0.2.11] - 2026-06-19
 
 ### Changed

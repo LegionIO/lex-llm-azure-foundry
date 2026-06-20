@@ -121,6 +121,10 @@ module Legion
 
           def stream_usage_supported? = true
 
+          def settings
+            AzureFoundry.default_settings.dig(:instances, :default)
+          end
+
           def api_base
             endpoint = config.azure_foundry_endpoint.to_s.sub(%r{/*\z}, '')
             return "#{endpoint}/openai/v1" if surface == OPENAI_V1_SURFACE && !endpoint.end_with?('/openai/v1')
@@ -143,29 +147,17 @@ module Legion
           def embedding_url(**) = path_for('embeddings')
           def health_url = models_url
 
-          def discover_offerings(live: false, **filters)
-            log.info { "discovering offerings live=#{live} from #{api_base}" }
-            offerings = filter_offerings(allowed_offerings, **filters)
-            return offerings unless live
-
-            offerings.map do |offering|
-              with_live_metadata(offering)
-            rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.discover_offerings')
-              with_health(offering, ready: false, checked: true, error: e)
-            end
-          end
-
-          def offering_for(model:, model_family: nil, canonical_model_alias: nil, instance_id: :default, # rubocop:disable Metrics/ParameterLists
+          def offering_for(model:, model_family: nil, canonical_model_alias: nil, instance_id: nil, # rubocop:disable Metrics/ParameterLists, Metrics/AbcSize
                            usage_type: nil, **metadata)
             deployment = self.class.deployment_config(model, config:)
             model_id = self.class.resolve_model_id(model, config:)
             configured_family = value_for(deployment, :model_family)
             configured_alias = value_for(deployment, :canonical_model_alias)
+            resolved_instance_id = instance_id || provider_instance_id
 
             build_offering(
               model: model_id,
-              instance_id: instance_id,
+              instance_id: resolved_instance_id,
               model_family: normalize_family(model_family || configured_family || infer_model_family(model_id)),
               canonical_model_alias: canonical_model_alias || configured_alias,
               usage_type: usage_type || value_for(deployment, :usage_type) || usage_type_for(model_id),
@@ -179,10 +171,12 @@ module Legion
             return baseline.merge(checked: false) unless live
 
             response = connection.get(health_url)
-            baseline.merge(checked: true, model_info: response.body)
+            baseline.merge(checked: true, ready: true, status: 'healthy', circuit_state: 'closed',
+                           raw: response.body)
           rescue StandardError => e
             handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.health')
-            baseline.merge(checked: true, ready: false, error: e.class.name, message: e.message)
+            baseline.merge(checked: true, ready: false, status: 'unhealthy', circuit_state: 'open',
+                           error: e.class.name, message: e.message)
           end
 
           def readiness(live: false)
@@ -258,11 +252,15 @@ module Legion
           end
 
           def health_baseline(live)
+            ready = configured?
             {
               provider: :azure_foundry,
-              configured: configured?,
-              ready: configured?,
+              instance_id: provider_instance_id,
+              configured: ready,
+              ready: ready,
               live: live,
+              status: ready ? 'healthy' : 'unhealthy',
+              circuit_state: ready ? 'closed' : 'open',
               api_base: api_base,
               surface: surface
             }
@@ -298,6 +296,20 @@ module Legion
             token ? "Bearer #{token}" : nil
           end
 
+          def discover_offerings(live: false, raise_on_unreachable: false, **filters)
+            offerings = allowed_offerings
+            return filter_offerings(offerings, **filters) unless live
+
+            resolved = offerings.map { |offering| with_live_metadata(offering) }
+            filter_offerings(resolved, **filters)
+          rescue Faraday::ConnectionFailed, Faraday::TimeoutError => e
+            log.warn("[#{slug}] instance=#{provider_instance_id} unreachable: #{e.message}")
+            raise if raise_on_unreachable
+
+            []
+          end
+          public :discover_offerings
+
           def configured_deployments
             self.class.normalize_deployments(config.azure_foundry_deployments)
           end
@@ -315,16 +327,34 @@ module Legion
           end
 
           def offering_from_config(deployment)
-            deployment_name = value_for(deployment, :deployment) || value_for(deployment, :model)
-            return nil if deployment_name.to_s.empty?
-
             offering_for(
-              model: deployment_name,
+              model: value_for(deployment, :deployment) || value_for(deployment, :model),
               model_family: value_for(deployment, :model_family),
               canonical_model_alias: value_for(deployment, :canonical_model_alias),
-              instance_id: value_for(deployment, :instance_id) || :default,
-              usage_type: value_for(deployment, :usage_type),
-              configured: true
+              instance_id: provider_instance_id,
+              usage_type: value_for(deployment, :usage_type) || :inference,
+              metadata: deployment_metadata(deployment)
+            )
+          end
+
+          def offering_from_model(model_info, _health: nil) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+            model_id = model_info.respond_to?(:id) ? model_info.id : model_info['id']
+            name = model_info.respond_to?(:name) ? model_info.name : model_info['name'] || model_id
+            family = model_info.respond_to?(:family) ? model_info.family : model_info['model_family']
+            usage = model_info.respond_to?(:embedding?) && model_info.embedding? ? :embedding : :inference
+            meta = if model_info.respond_to?(:metadata)
+                     model_info.metadata
+                   else
+                     model_info.is_a?(Hash) ? model_info : {}
+                   end
+
+            offering_for(
+              model: model_id,
+              model_family: family,
+              canonical_model_alias: name,
+              instance_id: provider_instance_id,
+              usage_type: usage,
+              metadata: meta
             )
           end
 
@@ -376,7 +406,7 @@ module Legion
 
           def resolve_capability_policy(model, usage_type)
             if usage_type.to_sym == :embedding
-              return { capabilities: %i[embeddings], sources: { embeddings: { value: true, source: :model_metadata } } }
+              return { capabilities: %i[embedding], sources: { embedding: { value: true, source: :model_metadata } } }
             end
 
             real_caps = real_capabilities_for(model)
