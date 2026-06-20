@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.11] - 2026-06-19
+
+### Changed
+- Adopt `Legion::Extensions::Llm::Inventory::ScopedRefresher` mixin (lex-llm 0.6.0). Discovery
+  refresh actors now write directly to the live `Inventory` catalog via `Inventory.write_lane`.
+- Pin `lex-llm >= 0.6.0` and `legion-llm >= 0.14.0` in gemspec.
+- Standard `weight: 100` default added to provider instance settings schema.
+
 ## 0.2.10 - 2026-06-16
 
 - Dependency updates and code quality improvements.
