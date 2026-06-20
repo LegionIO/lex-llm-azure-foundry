@@ -116,7 +116,9 @@ module Legion
 
             def build_lane(raw, instance_entry) # rubocop:disable Metrics/AbcSize,Metrics/CyclomaticComplexity,Metrics/PerceivedComplexity
               model       = raw[:model] || raw['model']
-              instance_id = raw[:instance_id] || raw['instance_id'] || instance_entry[:instance_id] || :default
+              instance_id = raw[:instance_id] || raw['instance_id'] ||
+                            instance_entry[:instance] || instance_entry[:instance_id] ||
+                            instance_entry[:id] || :default
               pf          = raw[:provider_family] || raw['provider_family'] || :azure_foundry
               type        = resolve_type(raw)
               tier        = (raw[:tier] || raw['tier'] || :cloud).to_sym
