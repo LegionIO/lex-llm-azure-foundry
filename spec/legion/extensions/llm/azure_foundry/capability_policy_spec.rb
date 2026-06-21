@@ -68,7 +68,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do # rubocop:disa
         offering = configured.discover_offerings(live: false).find { |o| o.model == 'gpt-4o-prod' }
 
         expect(offering.capability_sources[:tools]).to include(value: true, source: :instance_override)
-        expect(offering.capability_sources[:embeddings]).to include(value: false, source: :instance_override)
+        expect(offering.capability_sources[:embedding]).to include(value: false, source: :instance_override)
       end
     end
 
