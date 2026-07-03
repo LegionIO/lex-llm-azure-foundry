@@ -143,7 +143,7 @@ module Legion
           def completion_url = path_for('chat/completions')
           def chat_url = completion_url
           def stream_url = completion_url
-          def models_url = path_for('info')
+          def models_url = surface == MODEL_INFERENCE_SURFACE ? path_for('info') : path_for('models')
           def embedding_url(**) = path_for('embeddings')
           def health_url = models_url
 
@@ -285,10 +285,14 @@ module Legion
             config.azure_foundry_api_version || DEFAULT_API_VERSION
           end
 
+          # Paths MUST be relative (no leading slash). Faraday builds the
+          # connection with api_base as the base URL — on the openai_v1 surface
+          # that base carries the /openai/v1 path, and a leading-slash path would
+          # be treated as absolute and drop it, 404ing discovery and chat.
           def path_for(path)
-            prefix = surface == MODEL_INFERENCE_SURFACE ? '/models' : ''
+            prefix = surface == MODEL_INFERENCE_SURFACE ? 'models/' : ''
             suffix = surface == MODEL_INFERENCE_SURFACE ? "?api-version=#{api_version}" : ''
-            "#{prefix}/#{path}#{suffix}"
+            "#{prefix}#{path}#{suffix}"
           end
 
           def bearer_header
