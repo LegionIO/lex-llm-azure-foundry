@@ -46,7 +46,36 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
     expect(provider.api_base).to eq('https://example.openai.azure.com/openai/v1')
     expect([provider.chat_url, provider.embedding_url(model: 'text-embedding')])
-      .to eq(['/chat/completions', '/embeddings'])
+      .to eq(['chat/completions', 'embeddings'])
+  end
+
+  it 'lists and health-checks the OpenAI v1 surface at /models, not the model-inference /info route' do
+    Legion::Extensions::Llm.config.azure_foundry_surface = :openai_v1
+    Legion::Extensions::Llm.config.azure_foundry_endpoint = 'https://example.openai.azure.com'
+
+    expect([provider.models_url, provider.health_url]).to eq(%w[models models])
+  end
+
+  # Regression: Faraday::Connection is built with the endpoint (which carries the
+  # /openai/v1 path on this surface) as the base, then given each helper path. A
+  # LEADING slash makes Faraday treat the path as absolute and DROP /openai/v1,
+  # yielding 404s on discovery and chat. Paths must be relative so the base path
+  # survives. This asserts the fully composed URL the daemon actually requests.
+  it 'composes full OpenAI v1 URLs that preserve the /openai/v1 base path' do # rubocop:disable RSpec/ExampleLength
+    Legion::Extensions::Llm.config.azure_foundry_surface = :openai_v1
+    Legion::Extensions::Llm.config.azure_foundry_endpoint = 'https://example.openai.azure.com'
+
+    conn = Faraday.new(provider.api_base)
+    composed = [provider.chat_url, provider.models_url, provider.embedding_url(model: 'text-embedding')]
+               .map { |path| conn.build_url(path).to_s }
+
+    expect(composed).to eq(
+      [
+        'https://example.openai.azure.com/openai/v1/chat/completions',
+        'https://example.openai.azure.com/openai/v1/models',
+        'https://example.openai.azure.com/openai/v1/embeddings'
+      ]
+    )
   end
 
   it 'maps configured deployments to Azure Foundry routing offerings without live calls' do
@@ -325,11 +354,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   def expected_model_inference_endpoints
     [
-      '/models/chat/completions?api-version=2024-05-01-preview',
-      '/models/chat/completions?api-version=2024-05-01-preview',
-      '/models/info?api-version=2024-05-01-preview',
-      '/models/embeddings?api-version=2024-05-01-preview',
-      '/models/info?api-version=2024-05-01-preview'
+      'models/chat/completions?api-version=2024-05-01-preview',
+      'models/chat/completions?api-version=2024-05-01-preview',
+      'models/info?api-version=2024-05-01-preview',
+      'models/embeddings?api-version=2024-05-01-preview',
+      'models/info?api-version=2024-05-01-preview'
     ]
   end
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.14] - 2026-07-03
+
+### Fixed
+- Emit relative request paths from `path_for` (no leading slash). `Connection` builds Faraday with `api_base` as the base URL; on the `openai_v1` surface that base carries the `/openai/v1` path, and a leading-slash path was treated as absolute and dropped it — 404ing live discovery (empty offerings) and chat. Paths are now relative so the base path survives on both surfaces.
+- Resolve `models_url`/`health_url` per surface: `models` on `openai_v1`, `models/info` on `model_inference`. Previously always `info`, which 404s on the `openai_v1` surface.
+
 ## [0.2.13] - 2026-06-20
 
 ### Fixed
