@@ -15,6 +15,9 @@ module Legion
           DEFAULT_API_VERSION = '2024-05-01-preview'
           MODEL_INFERENCE_SURFACE = :model_inference
           OPENAI_V1_SURFACE = :openai_v1
+          # Keys a live model catalog might use to report context length. Azure's own
+          # endpoints rarely do (see deployment_limits), so this is a best-effort read.
+          CATALOG_CONTEXT_KEYS = %i[context_window max_input_tokens context_length].freeze
 
           class << self
             def slug = 'azure_foundry'
@@ -161,7 +164,8 @@ module Legion
               model_family: normalize_family(model_family || configured_family || infer_model_family(model_id)),
               canonical_model_alias: canonical_model_alias || configured_alias,
               usage_type: usage_type || value_for(deployment, :usage_type) || usage_type_for(model_id),
-              metadata: metadata.merge(deployment_metadata(deployment))
+              metadata: metadata.merge(deployment_metadata(deployment)),
+              limits: deployment_limits(deployment)
             )
           end
 
@@ -275,6 +279,7 @@ module Legion
               provider: :azure_foundry,
               family: offering.metadata[:model_family],
               capabilities: capabilities,
+              context_length: offering.context_window,
               modalities_input: modalities[:input],
               modalities_output: modalities[:output],
               metadata: offering.to_h
@@ -362,7 +367,8 @@ module Legion
             )
           end
 
-          def build_offering(model:, model_family:, usage_type:, instance_id:, canonical_model_alias:, metadata:) # rubocop:disable Metrics/ParameterLists
+          def build_offering(model:, model_family:, usage_type:, instance_id:, canonical_model_alias:, # rubocop:disable Metrics/ParameterLists
+                             metadata:, limits: {})
             policy = resolve_capability_policy(model, usage_type)
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :azure_foundry,
@@ -373,6 +379,7 @@ module Legion
               usage_type: usage_type.to_sym,
               capabilities: policy[:capabilities],
               capability_sources: policy[:sources],
+              limits: limits,
               metadata: metadata.merge(
                 model_family: model_family,
                 canonical_model_alias: canonical_model_alias,
@@ -384,14 +391,29 @@ module Legion
           def with_live_metadata(offering)
             response = connection.get(models_url)
             metadata = offering.metadata.merge(model_info: response.body)
-            with_health(offering, ready: true, checked: true, metadata:)
+            # Prefer a context_window the live catalog actually reports; fall back to
+            # whatever the deployment config already resolved (Azure endpoints usually
+            # omit context length, so config remains authoritative).
+            limits = offering.to_h[:limits].to_h
+            catalog_window = catalog_context_window(response.body)
+            limits = limits.merge(context_window: catalog_window) if catalog_window
+            with_health(offering, ready: true, checked: true, metadata:, limits:)
           end
 
-          def with_health(offering, ready:, checked:, error: nil, metadata: offering.metadata)
+          def catalog_context_window(body)
+            return nil unless body.is_a?(Hash)
+
+            value = CATALOG_CONTEXT_KEYS.filter_map { |key| body[key] || body[key.to_s] }.first
+            value&.to_i
+          end
+
+          def with_health(offering, ready:, checked:, error: nil, metadata: offering.metadata, limits: nil) # rubocop:disable Metrics/ParameterLists
             health = { ready: ready, checked: checked }
             health = health.merge(error: error.class.name, message: error.message) if error
 
-            Legion::Extensions::Llm::Routing::ModelOffering.new(offering.to_h.merge(health:, metadata:))
+            data = offering.to_h.merge(health:, metadata:)
+            data[:limits] = limits if limits
+            Legion::Extensions::Llm::Routing::ModelOffering.new(data)
           end
 
           def filter_offerings(offerings, model_family: nil, usage_type: nil, **)
@@ -400,6 +422,24 @@ module Legion
               usage_matches = usage_type.nil? || offering.usage_type == usage_type.to_sym
               family_matches && usage_matches
             end
+          end
+
+          # Azure's inference-plane endpoints do NOT report per-model context length
+          # (model_inference GET /info returns only model_name/model_type/
+          # model_provider_name; the openai_v1 GET /models is an OpenAI-style
+          # id/created/owned_by list). So context_window is sourced from the
+          # per-deployment instance config (keys :context_window / :max_input_tokens);
+          # live discovery (with_live_metadata) can override it when a catalog entry
+          # actually carries it. Absent both, the window is nil — a per-instance gap,
+          # never a hardcoded guess.
+          def deployment_limits(deployment)
+            return {} unless deployment
+
+            context_window = value_for(deployment, :context_window) || value_for(deployment, :max_input_tokens)
+            {
+              context_window: context_window&.to_i,
+              max_output_tokens: value_for(deployment, :max_output_tokens)&.to_i
+            }.compact
           end
 
           def deployment_metadata(deployment)

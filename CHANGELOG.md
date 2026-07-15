@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.15] - 2026-07-09
+
+### Fixed
+- Offerings now populate `limits[:context_window]` (and `max_output_tokens`), so the router sees real capacity for Azure lanes instead of nil/unbounded. `build_offering` previously never set `limits` — deployment config context sizes landed in `metadata` and were invisible to routing (a request could then mis-route to an Azure lane the router thought had unlimited context). `context_window` is sourced from live catalog when the endpoint reports it, else per-deployment instance config (`context_window`/`max_input_tokens`), else nil (a genuine per-instance gap — never a hardcoded guess). Azure's inference-plane endpoints (`model_inference GET /info`, `openai_v1 GET /models`) do not report per-model context length, mirroring the OpenAI/Bedrock cloud providers. `Model::Info#context_length` (models API) is populated the same way.
+
 ## [0.2.14] - 2026-07-03
 
 ### Fixed
