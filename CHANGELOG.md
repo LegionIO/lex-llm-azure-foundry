@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.16] - 2026-08-04
+
+### Fixed
+- Normalize canonical nested `credentials` and `provider` settings into the Azure Foundry adapter configuration while preserving flat-key aliases.
+
 ## [0.2.15] - 2026-07-09
 
 ### Fixed

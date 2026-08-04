@@ -224,6 +224,26 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       )
     end
 
+    it 'resolves the canonical nested credentials and provider shape' do # rubocop:disable RSpec/ExampleLength
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
+        .with(:extensions, :llm, :azure_foundry)
+        .and_return({ instances: { shrutich: {
+                      endpoint: 'https://shrutich.openai.azure.com/openai/v1',
+                      credentials: { api_key: 'ak-nested', bearer_token: 'bt-nested' },
+                      provider: { surface: 'openai_v1', api_version: '2024-05-01-preview',
+                                  deployments: ['gpt-4o-mini'] }
+                    } } })
+
+      expect(described_class.discover_instances[:shrutich]).to include(
+        azure_foundry_endpoint: 'https://shrutich.openai.azure.com/openai/v1',
+        azure_foundry_api_key: 'ak-nested',
+        azure_foundry_bearer_token: 'bt-nested',
+        azure_foundry_surface: 'openai_v1',
+        azure_foundry_api_version: '2024-05-01-preview',
+        azure_foundry_deployments: ['gpt-4o-mini']
+      )
+    end
+
     it 'skips named instances without an endpoint' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
