@@ -92,6 +92,8 @@ module Legion
 
         def self.normalize_instance_config(config) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
           normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+          resolve_nested_credentials(normalized)
+          resolve_nested_provider(normalized)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:endpoint)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:base_url)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:api_base)
@@ -103,8 +105,32 @@ module Legion
           normalized.compact.except(:instances)
         end
 
+        # Nested `credentials: { api_key:, bearer_token: }` is the canonical shape
+        # (matches default_settings and every other lex-llm-* provider). Flat keys
+        # remain accepted as aliases.
+        def self.resolve_nested_credentials(normalized)
+          creds = normalized.delete(:credentials)
+          return unless creds.is_a?(Hash)
+
+          creds = creds.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+          normalized[:azure_foundry_api_key] ||= creds[:api_key]
+          normalized[:azure_foundry_bearer_token] ||= creds[:bearer_token]
+        end
+
+        # Nested `provider: { api_version:, surface:, deployments: }` is the
+        # canonical shape from default_settings. Flat keys remain accepted.
+        def self.resolve_nested_provider(normalized)
+          prov = normalized.delete(:provider)
+          return unless prov.is_a?(Hash)
+
+          prov = prov.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
+          normalized[:azure_foundry_api_version] ||= prov[:api_version]
+          normalized[:azure_foundry_surface] ||= prov[:surface]
+          normalized[:azure_foundry_deployments] ||= prov[:deployments]
+        end
+
         private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
-                             :normalize_instance_config
+                             :normalize_instance_config, :resolve_nested_credentials, :resolve_nested_provider
 
         Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end
