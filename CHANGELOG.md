@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.17] - 2026-08-07
+
+### Fixed
+- Remove dead legacy discovery calls from `#manual` actor method (closes #154).
+
+### Removed
+- Deleted `populate_auto_rules`, `refresh_discovered_models!`, and `invalidate_offerings_cache!` invocations that targeted APIs removed from the SSOT router.
+
 ## [0.2.16] - 2026-08-04
 
 ### Fixed

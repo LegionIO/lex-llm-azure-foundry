@@ -45,20 +45,8 @@ module Legion
               Legion::Settings.dig(:extensions, :llm, :azure_foundry, :discovery_interval) || self.class.every_seconds
             end
 
-            def manual # rubocop:disable Metrics/CyclomaticComplexity
-              log.debug('[azure_foundry][discovery_refresh] refreshing model list')
-              tick if respond_to?(:tick)
-
-              return unless defined?(Legion::LLM::Discovery)
-
-              Legion::LLM::Discovery.refresh_discovered_models!(provider: :azure_foundry)
-
-              if defined?(Legion::LLM::Router) && Legion::LLM::Router.respond_to?(:populate_auto_rules)
-                Legion::LLM::Router.populate_auto_rules(Legion::LLM::Discovery.discovered_instances)
-              end
-              if defined?(Legion::LLM::Inventory) && Legion::LLM::Inventory.respond_to?(:invalidate_offerings_cache!)
-                Legion::LLM::Inventory.invalidate_offerings_cache!
-              end
+            def manual
+              tick_if_scoped_refresher
             rescue StandardError => e
               handle_exception(e, level: :warn, handled: true, operation: 'azure_foundry.actor.discovery_refresh')
             end
@@ -91,6 +79,13 @@ module Legion
             end
 
             private
+
+            def tick_if_scoped_refresher
+              return unless defined?(Legion::Extensions::Llm::Inventory::ScopedRefresher)
+              return unless self.class.ancestors.include?(Legion::Extensions::Llm::Inventory::ScopedRefresher)
+
+              tick
+            end
 
             def collect_instance_lanes(instance_entry, lanes)
               adapter = instance_entry[:adapter]
