@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0] - 2026-08-13
+
+### Changed
+- **SSOT v3 migration** — Rewrote `DiscoveryRefresh` actor to use `Inventory::Publisher` for instance lifecycle (claim/activate/replace/remove) instead of the legacy `ScopedRefresher` mixin and `Legion::LLM::Call::Registry`.
+- Added `AzureFoundryCallable` class implementing `disconnect`, `disconnected?`, `normalize_dispatch_error(error:)`, and dispatch operations (`chat`, `stream_chat`, `embed`, `count_tokens`).
+- Fleet worker now passes `registry: Legion::Extensions::Llm::Inventory::Registry` for exact fleet execution.
+- Instance identity derived from normalized endpoint host:port plus API key fingerprint (first 6 hex of SHA256).
+- Offerings publish deployment-scoped quota domains (`azure:deployment:<name>`).
+- Operation evidence covers all `Taxonomies::OPERATIONS`: chat/stream_chat supported, embed conditional on deployment type, count_tokens/image/transcribe/translate/speak/moderate unsupported.
+- Bumped `lex-llm` dependency floor to `>= 0.7.0`.
+
+### Removed
+- Removed `ScopedRefresher` include and all references to `Legion::LLM::Call::Registry`.
+- Removed legacy `compute_lanes_for_scope`, `scope_key`, `credential_hash` methods.
+
 ## [0.2.17] - 2026-08-07
 
 ### Fixed

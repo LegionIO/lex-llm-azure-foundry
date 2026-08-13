@@ -25,6 +25,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::FleetWorker do
       provider_family: :azure_foundry,
       provider_class: Legion::Extensions::Llm::AzureFoundry::Provider,
       provider_instances: satisfy { |resolver| resolver.call == instances },
+      registry: Legion::Extensions::Llm::Inventory::Registry,
       delivery: delivery,
       properties: properties
     )
