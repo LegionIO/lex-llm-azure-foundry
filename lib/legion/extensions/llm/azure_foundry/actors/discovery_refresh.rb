@@ -82,7 +82,7 @@ module Legion
             end
 
             def apply_auth_headers(faraday:, instance_cfg:)
-              api_key = instance_cfg[:azure_foundry_api_key] || instance_cfg.dig(:credentials, :api_key)
+              api_key = instance_cfg[:azure_foundry_api_key]
               faraday.headers['api-key'] = api_key if api_key.is_a?(String) && !api_key.strip.empty?
             end
           end
@@ -276,43 +276,22 @@ module Legion
           module InstanceConfigHelpers
             private
 
+            # Returns all explicitly configured instances that have a non-blank endpoint.
+            # The registered default_settings entry (instances[:default] with endpoint: nil)
+            # is skipped; operators configure named instances in settings[:instances].
             def configured_instances
-              instances = instances_from_settings
-              return instances unless instances.empty?
-
-              build_default_instance
-            end
-
-            def instances_from_settings
               instances = {}
               cfg_instances = settings[:instances]
               return instances unless cfg_instances.is_a?(Hash)
 
               cfg_instances.each do |name, config|
-                instances[name.to_sym] = normalize_instance_config(config: config)
+                normalized = normalize_instance_config(config: config)
+                ep = normalized[:azure_foundry_endpoint]
+                next if ep.nil? || ep.to_s.strip.empty?
+
+                instances[name.to_sym] = normalized
               end
               instances
-            end
-
-            def build_default_instance
-              endpoint = settings[:endpoint] || settings[:azure_foundry_endpoint]
-              return {} if endpoint.nil? || endpoint.to_s.strip.empty?
-
-              { default: default_instance_config(endpoint: endpoint) }
-            end
-
-            def default_instance_config(endpoint:)
-              inst = settings[:instances][:default]
-              creds = inst[:credentials]
-              prov = inst[:provider]
-              {
-                azure_foundry_endpoint: endpoint,
-                tier: inst[:tier],
-                azure_foundry_api_key: creds[:api_key],
-                azure_foundry_surface: prov[:surface],
-                azure_foundry_api_version: prov[:api_version],
-                azure_foundry_deployments: prov[:deployments]
-              }
             end
 
             def normalize_instance_config(config:)
@@ -362,9 +341,9 @@ module Legion
             private
 
             def derive_instance_id(instance_cfg:)
-              endpoint = instance_cfg[:azure_foundry_endpoint] || instance_cfg[:endpoint] || 'https://localhost:443'
+              endpoint = instance_cfg[:azure_foundry_endpoint] || 'https://localhost:443'
               host_port = extract_host_port(url: endpoint)
-              api_key = instance_cfg[:azure_foundry_api_key] || instance_cfg.dig(:credentials, :api_key)
+              api_key = instance_cfg[:azure_foundry_api_key]
 
               return "#{host_port}/ak:#{::Digest::SHA256.hexdigest(api_key)[0, 6]}" if
                 api_key.is_a?(String) && !api_key.strip.empty?
@@ -377,8 +356,10 @@ module Legion
               host = (uri.host || 'localhost').downcase
               port = uri.port
               "#{host}:#{port}"
-            rescue URI::InvalidURIError
-              'unknown:0'
+            rescue URI::InvalidURIError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.extract_host_port',
+                                  url: url.to_s[0, 200])
+              raise
             end
           end
 

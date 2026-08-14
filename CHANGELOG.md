@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.2] - 2026-08-13
+
+### Fixed
+- **§1 — zero rubocop:disable** — Removed every `rubocop:disable` / `rubocop:enable` inline directive from `lib/` and `spec/`. Refactored `azure_foundry.rb`, `provider.rb`, and the fleet-worker spec to comply without suppression: extracted `ProviderClassMethods`, `ProviderDispatchMethods`, `ProviderOfferingHelpers`, `ProviderOfferingMetadata`, `ProviderCapabilityHelpers`, `Capabilities` modules and new private helpers (`extract_endpoint_from_cfg`, `extract_tier_from_cfg`, `promote_endpoint_aliases`, `promote_provider_aliases`, `resolve_usage_type`, `resolve_model_family`, `build_offering_record`, `build_offering_metadata`).
+- **§9 — :default substitution removed** — Deleted `build_default_instance` and `default_instance_config` from `InstanceConfigHelpers`; `configured_instances` now reads `settings[:instances]` directly and skips entries with nil/empty endpoints. Removed `settings[:endpoint] || settings[:azure_foundry_endpoint]` `||` guard.
+- **§1 — swallowed rescue** — `extract_host_port` in `InstanceIdentityHelpers` now calls `handle_exception` and re-raises on `URI::InvalidURIError` instead of silently returning `'unknown:0'`.
+- **§1 — credentials .dig removed** — `apply_auth_headers` and `derive_instance_id` in the discovery actor now read only from `instance_cfg[:azure_foundry_api_key]`; the `instance_cfg.dig(:credentials, :api_key)` fallback was removed (all configs pass through `normalize_instance_config` which promotes this key).
+- **§6 — circuit_state vocabulary** — Removed `circuit_state:` field from `Provider#health_baseline` and from all spec assertions; availability is probe-cleared only, not modelled as a circuit breaker.
+- **spec path** — Renamed `spec/…/actors/fleet_worker_spec.rb` to `spec/…/actor/fleet_worker_spec.rb` to match the `Actor::FleetWorker` module path and satisfy `RSpec/SpecFilePathFormat`.
+- **INSTANCE_DEFAULTS constant** — Extracted default instance settings hash to `AzureFoundry::INSTANCE_DEFAULTS` to reduce `default_settings` line count below the `Metrics/ModuleLength` limit.
+
 ## [0.3.1] - 2026-08-13
 
 ### Fixed

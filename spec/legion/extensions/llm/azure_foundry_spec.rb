@@ -90,13 +90,14 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(offline_health).to include(offline_health_matcher)
   end
 
-  it 'returns live readiness metadata including provider and circuit state' do
+  it 'returns live readiness metadata including provider' do
     allow(provider.connection).to receive(:get).with(provider.health_url).and_return(fake_response({}))
 
     readiness = provider.readiness(live: true)
 
     expect(readiness).to include(provider: :azure_foundry, live: true, local: false, remote: true)
-    expect(readiness).to include(ready: true, status: 'healthy', circuit_state: 'closed')
+    expect(readiness).to include(ready: true, status: 'healthy')
+    expect(readiness).not_to have_key(:circuit_state)
   end
 
   it 'returns an array of Model::Info instances from list_models' do
@@ -337,11 +338,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   def offline_health_matcher
     {
       provider: :azure_foundry,
-      instance_id: :default,
       ready: true,
       checked: false,
-      status: 'healthy',
-      circuit_state: 'closed'
+      status: 'healthy'
     }
   end
 

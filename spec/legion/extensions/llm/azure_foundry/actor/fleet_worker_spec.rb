@@ -16,7 +16,7 @@ end
 
 require 'legion/extensions/llm/azure_foundry/actors/fleet_worker'
 
-RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::FleetWorker do # rubocop:disable RSpec/SpecFilePathFormat
+RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::FleetWorker do
   subject(:actor) { described_class.new }
 
   it 'uses the provider-owned fleet runner' do

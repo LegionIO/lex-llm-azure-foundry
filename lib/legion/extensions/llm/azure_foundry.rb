@@ -16,37 +16,27 @@ module Legion
 
         PROVIDER_FAMILY = :azure_foundry
 
+        INSTANCE_DEFAULTS = {
+          endpoint: nil,
+          tier: :frontier,
+          transport: :http,
+          credentials: { api_key: nil, bearer_token: nil },
+          provider: { api_version: Provider::DEFAULT_API_VERSION, surface: nil, deployments: [] },
+          usage: { inference: true, embedding: true, image: false },
+          limits: { concurrency: 4 },
+          fleet: { enabled: false, respond_to_requests: false,
+                   capabilities: %i[chat stream_chat embed tools] }
+        }.freeze
+
         def self.default_settings
           ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
             discovery: { interval_seconds: 3600 },
-            instance: {
-              endpoint: nil,
-              tier: :frontier,
-              transport: :http,
-              credentials: {
-                api_key: nil,
-                bearer_token: nil
-              },
-              provider: {
-                api_version: Provider::DEFAULT_API_VERSION,
-                surface: nil,
-                deployments: []
-              },
-              usage: { inference: true, embedding: true, image: false },
-              limits: { concurrency: 4 },
-              fleet: {
-                enabled: false,
-                respond_to_requests: false,
-                capabilities: %i[chat stream_chat embed tools]
-              }
-            }
+            instance: INSTANCE_DEFAULTS
           )
         end
 
-        def self.provider_class
-          Provider
-        end
+        def self.provider_class = Provider
 
         def self.registry_publisher
           @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
@@ -59,15 +49,14 @@ module Legion
           instances
         end
 
-        def self.discover_default_instance(instances) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+        def self.discover_default_instance(instances)
           cfg = CredentialSources.setting(:extensions, :llm, :azure_foundry)
           return unless cfg.is_a?(Hash)
 
-          endpoint = cfg[:endpoint] || cfg['endpoint'] || cfg[:base_url] || cfg['base_url'] || cfg[:api_base] ||
-                     cfg['api_base']
+          endpoint = extract_endpoint_from_cfg(cfg)
           return if endpoint.nil? || endpoint.to_s.strip.empty?
 
-          instances[:settings] = normalize_instance_config(cfg).merge(tier: cfg[:tier] || cfg['tier'] || :cloud)
+          instances[:settings] = normalize_instance_config(cfg).merge(tier: extract_tier_from_cfg(cfg))
         end
 
         def self.discover_named_instances(instances)
@@ -80,30 +69,43 @@ module Legion
           named.each { |name, config| add_named_instance(instances, name, config) }
         end
 
-        def self.add_named_instance(instances, name, config) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+        def self.add_named_instance(instances, name, config)
           return unless config.is_a?(Hash)
 
-          endpoint = config[:endpoint] || config['endpoint'] || config[:base_url] || config['base_url'] ||
-                     config[:api_base] || config['api_base']
+          endpoint = extract_endpoint_from_cfg(config)
           return if endpoint.nil? || endpoint.to_s.strip.empty?
 
-          instances[name.to_sym] =
-            normalize_instance_config(config).merge(tier: config[:tier] || config['tier'] || :cloud)
+          instances[name.to_sym] = normalize_instance_config(config).merge(tier: extract_tier_from_cfg(config))
         end
 
-        def self.normalize_instance_config(config) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
+        def self.normalize_instance_config(config)
           normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
           resolve_nested_credentials(normalized)
           resolve_nested_provider(normalized)
+          promote_endpoint_aliases(normalized)
+          promote_provider_aliases(normalized)
+          normalized.compact.except(:instances)
+        end
+
+        def self.extract_endpoint_from_cfg(cfg)
+          cfg[:endpoint] || cfg['endpoint'] || cfg[:base_url] || cfg['base_url'] ||
+            cfg[:api_base] || cfg['api_base']
+        end
+
+        def self.extract_tier_from_cfg(cfg) = cfg[:tier] || cfg['tier'] || :cloud
+
+        def self.promote_endpoint_aliases(normalized)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:endpoint)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:base_url)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:api_base)
+        end
+
+        def self.promote_provider_aliases(normalized)
           normalized[:azure_foundry_api_key] ||= normalized.delete(:api_key)
           normalized[:azure_foundry_bearer_token] ||= normalized.delete(:bearer_token)
           normalized[:azure_foundry_api_version] ||= normalized.delete(:api_version)
           normalized[:azure_foundry_surface] ||= normalized.delete(:surface)
           normalized[:azure_foundry_deployments] ||= normalized.delete(:deployments)
-          normalized.compact.except(:instances)
         end
 
         # Nested `credentials: { api_key:, bearer_token: }` is the canonical shape
@@ -131,7 +133,9 @@ module Legion
         end
 
         private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
-                             :normalize_instance_config, :resolve_nested_credentials, :resolve_nested_provider
+                             :normalize_instance_config, :resolve_nested_credentials, :resolve_nested_provider,
+                             :extract_endpoint_from_cfg, :extract_tier_from_cfg,
+                             :promote_endpoint_aliases, :promote_provider_aliases
 
         Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end
