@@ -13,7 +13,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::FleetWorker do
   let(:properties) { instance_double(FleetWorkerSpecProperties) }
   let(:instances) { { local: { fleet: { respond_to_requests: true } } } }
 
-  it 'delegates fleet execution to the shared lex-llm responder helper' do # rubocop:disable RSpec/ExampleLength
+  it 'delegates fleet execution to the shared lex-llm responder helper' do
     allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 

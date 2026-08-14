@@ -2,8 +2,8 @@
 
 require 'spec_helper'
 
-RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do # rubocop:disable RSpec/SpecFilePathFormat
-  subject(:provider) { described_class.new(Legion::Extensions::Llm.config) }
+RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider capability policy' do
+  subject(:provider) { Legion::Extensions::Llm::AzureFoundry::Provider.new(Legion::Extensions::Llm.config) }
 
   before do
     Legion::Extensions::Llm.configure do |config|
@@ -56,15 +56,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do # rubocop:disa
       let(:deployments) { [{ deployment: 'gpt-4o-prod', model_family: :openai, usage_type: :inference }] }
       let(:provider_settings) { { endpoint: 'https://example.services.ai.azure.com' } }
 
-      it 'applies tools as :instance_override and embedding_flag false as :instance_override' do # rubocop:disable RSpec/ExampleLength
-        configured = described_class.new(
-          azure_foundry_endpoint: 'https://example.services.ai.azure.com',
-          azure_foundry_api_key: 'test-key',
-          azure_foundry_surface: :model_inference,
-          azure_foundry_deployments: deployments,
-          tools_flag: true,
-          embedding_flag: false
-        )
+      it 'applies tools as :instance_override and embedding_flag false as :instance_override' do
+        configured = build_configured_provider
         offering = configured.discover_offerings(live: false).find { |o| o.model == 'gpt-4o-prod' }
 
         expect(offering.capability_sources[:tools]).to include(value: true, source: :instance_override)
@@ -93,6 +86,17 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do # rubocop:disa
         expect(offering.capabilities).to include(:vision)
       end
     end
+  end
+
+  def build_configured_provider
+    Legion::Extensions::Llm::AzureFoundry::Provider.new(
+      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
+      azure_foundry_api_key: 'test-key',
+      azure_foundry_surface: :model_inference,
+      azure_foundry_deployments: deployments,
+      tools_flag: true,
+      embedding_flag: false
+    )
   end
 
   def first_offering

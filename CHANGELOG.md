@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1] - 2026-08-13
+
+### Fixed
+- **§1 / §8 compliance sweep** — Removed all `rubocop:disable` comments. Extracted helper modules (`HealthCheckHelpers`, `OfferingBuilderHelpers`, `InstanceConfigHelpers`, `InstanceIdentityHelpers`, `ProbeHelpers`, `ShutdownHelpers`) from `DiscoveryRefresh` to bring `Metrics/ClassLength` and `Metrics/AbcSize` into conformance.
+- **§8 health firewall** — `AzureFoundryCallable#classify_server_error` now maps 503 to `:instance_unavailable` ONLY when the Azure `EndpointDeactivated` error code appears in the response body; all other 5xx (including plain 503 overload) remain `:overloaded` or `:provider_error`. `Faraday::ConnectionFailed` and `Faraday::TimeoutError` remain request-local and never promote the instance to unavailable.
+- **§9 / settings guards** — Removed `def settings` override in `Provider` that called `.dig(:instances, :default)`. Removed `settings[:discovery_interval] || ...` and all `settings.dig(...)` patterns in `DiscoveryRefresh`; replaced with direct canonical path access (`settings[:discovery][:interval_seconds]`, `settings[:instances][:default][...]`).
+- **§2 / single publication engine** — Removed `registry_publisher.publish_readiness_async` call from `Provider#readiness` and `registry_publisher.publish_models_async` call from `Provider#list_models`; publication is now exclusively through `Inventory::Publisher` in the discovery actor.
+- Vision capability evidence in `OfferingBuilderHelpers` now emits `:unknown` / `:default_false` instead of inferring support from model name regex (which is not authoritative proof).
+- Discovery interval default overridden to 3600 s via `provider_settings(discovery: { interval_seconds: 3600 })` to match the previous actor behaviour.
+
 ## [0.3.0] - 2026-08-13
 
 ### Changed

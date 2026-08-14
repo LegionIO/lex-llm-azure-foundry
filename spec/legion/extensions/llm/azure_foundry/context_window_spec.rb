@@ -13,8 +13,8 @@ require 'spec_helper'
 # model catalog when the endpoint provides it, otherwise from the per-deployment
 # instance config (keys :context_window / :max_input_tokens). When neither is
 # present the window is simply nil — a per-instance gap, never a hardcoded guess.
-RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do # rubocop:disable RSpec/SpecFilePathFormat
-  subject(:provider) { described_class.new(Legion::Extensions::Llm.config) }
+RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider context window' do
+  subject(:provider) { Legion::Extensions::Llm::AzureFoundry::Provider.new(Legion::Extensions::Llm.config) }
 
   before do
     Legion::Extensions::Llm.configure do |config|

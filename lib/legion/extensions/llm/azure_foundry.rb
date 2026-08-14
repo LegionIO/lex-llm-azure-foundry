@@ -19,6 +19,7 @@ module Legion
         def self.default_settings
           ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
+            discovery: { interval_seconds: 3600 },
             instance: {
               endpoint: nil,
               tier: :frontier,

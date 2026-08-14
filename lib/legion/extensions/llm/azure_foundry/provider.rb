@@ -124,10 +124,6 @@ module Legion
 
           def stream_usage_supported? = true
 
-          def settings
-            AzureFoundry.default_settings.dig(:instances, :default)
-          end
-
           def api_base
             endpoint = config.azure_foundry_endpoint.to_s.sub(%r{/*\z}, '')
             return "#{endpoint}/openai/v1" if surface == OPENAI_V1_SURFACE && !endpoint.end_with?('/openai/v1')
@@ -185,16 +181,12 @@ module Legion
 
           def readiness(live: false)
             log.info { "checking readiness live=#{live} at #{api_base}" }
-            health(live: live).merge(local: false, remote: true, endpoints: endpoint_manifest).tap do |metadata|
-              self.class.registry_publisher.publish_readiness_async(metadata) if live
-            end
+            health(live: live).merge(local: false, remote: true, endpoints: endpoint_manifest)
           end
 
           def list_models
             log.info { "listing configured deployment models from #{api_base}" }
-            models = discover_offerings(live: false).map { |offering| model_info_from_offering(offering) }
-            self.class.registry_publisher.publish_models_async(models, readiness: readiness(live: false))
-            models
+            discover_offerings(live: false).map { |offering| model_info_from_offering(offering) }
           end
 
           def chat(
