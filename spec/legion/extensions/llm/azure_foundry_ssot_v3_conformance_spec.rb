@@ -2,8 +2,6 @@
 
 require 'spec_helper'
 require 'faraday'
-require 'digest'
-require 'uri'
 
 require 'legion/extensions/llm/inventory/publisher'
 require 'legion/extensions/llm/inventory/registry'
@@ -17,155 +15,78 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
-# Stub the actor runtime so discovery_refresh.rb loads the AzureFoundryCallable class.
-module Legion
-  module Extensions
-    module Actors
-      unless const_defined?(:Every, false)
-        # Stub base class for discovery actor loading in test context
-        class Every
-          def self.every_seconds = 3600
-        end
-      end
-    end
-
-    module Helpers
-      module Lex; end unless const_defined?(:Lex, false)
-    end
-  end
-end
-
-# Use `load` instead of `require` because spec_helper already required the file
-# (which returned early due to missing Every class). Now that we have the stub,
-# we need to force-reload so the classes are actually defined.
-load File.expand_path('../../../../lib/legion/extensions/llm/azure_foundry/actors/discovery_refresh.rb', __dir__)
-
-# Test-local callable that extends AzureFoundryCallable with tracking.
-# Tracks inference call count for conformance assertions.
-class TrackingAzureFoundryCallable < Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable
+# Spec double standing in for AzureFoundry::Provider at the dispatch boundary.
+# The production AzureFoundryCallable is used verbatim; only the per-instance
+# Provider (the HTTP boundary) is replaced so specs never touch the network.
+class RecordingAzureFoundryProvider
   attr_reader :call_count
 
-  def initialize(instance_cfg:, logger:)
-    super
+  def initialize
     @call_count = 0
   end
 
-  def chat(model:, **)
+  def chat(**kwargs)
     @call_count += 1
-    { role: 'assistant', content: 'test response', model: model }
+    { role: 'assistant', content: 'test response', model: kwargs[:model] }
   end
 
-  def stream_chat(model:, **)
+  def stream(**kwargs)
     @call_count += 1
-    { role: 'assistant', content: 'streamed response', model: model }
+    { role: 'assistant', content: 'streamed response', model: kwargs[:model] }
+  end
+
+  def embed(**kwargs)
+    @call_count += 1
+    { embedding: [0.1, 0.2, 0.3], model: kwargs[:model] }
+  end
+
+  def count_tokens(**)
+    @call_count += 1
+    { token_count: 42 }
+  end
+end
+
+# Captures the exact `model:` value each dispatch op hands to the provider
+# boundary, proving the D15 raw-string-model handling (the counting double
+# above cannot, because it ignores model).
+class ModelCapturingAzureFoundryProvider
+  attr_reader :received_models
+
+  def initialize
+    @received_models = {}
+  end
+
+  def chat(model:, **)
+    record(:chat, model)
+  end
+
+  def stream(model:, **)
+    record(:stream_chat, model)
   end
 
   def embed(model:, **)
-    @call_count += 1
-    { embedding: [0.1, 0.2, 0.3], model: model }
+    record(:embed, model)
   end
 
   def count_tokens(model:, **)
-    @call_count += 1
-    { token_count: 42, model: model }
+    record(:count_tokens, model)
   end
-end
 
-# Evidence-building and escalation helpers for the SSOT v3 conformance harness.
-# Extracted to a module so AzureFoundrySsotHarness stays under the class length limit.
-module AzureFoundrySsotEvidenceHelpers
   private
 
-  def build_operation_evidence(now:, embed_supported:)
-    embed_status = embed_supported ? :supported : :unsupported
-    {
-      chat: op_evidence(:chat, :supported, now),
-      stream_chat: op_evidence(:stream_chat, :supported, now),
-      embed: op_evidence(:embed, embed_status, now),
-      image: op_evidence(:image, :unsupported, now),
-      transcribe: op_evidence(:transcribe, :unsupported, now),
-      translate: op_evidence(:translate, :unsupported, now),
-      speak: op_evidence(:speak, :unsupported, now),
-      moderate: op_evidence(:moderate, :unsupported, now),
-      count_tokens: op_evidence(:count_tokens, :unsupported, now)
-    }
-  end
-
-  def op_evidence(operation, status, observed_at)
-    source = status == :unknown ? :default_false : :provider_implementation
-    Legion::Extensions::Llm::Inventory::OperationEvidence.new(
-      operation: operation, status: status, source: source, observed_at: observed_at
-    )
-  end
-
-  def build_capability_evidence
-    {
-      completion: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :completion, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      streaming: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :streaming, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      tools: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :tools, status: :supported, source: :provider_implementation, observed_at: Time.now
-      ),
-      thinking: Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-        capability: :thinking, status: :unknown, source: :default_false, observed_at: Time.now
-      )
-    }
-  end
-
-  def extract_host_port(base_url:)
-    uri = URI.parse(base_url.to_s)
-    "#{(uri.host || 'localhost').downcase}:#{uri.port}"
-  end
-
-  def build_single_offering(deployment_name:, model_id:, tier:, now:)
-    absent = Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent)
-    Legion::Extensions::Llm::Inventory::OfferingDraft.new(
-      provider_native_key: deployment_name, model: model_id, tier: tier,
-      operation_evidence: build_operation_evidence(now: now, embed_supported: false),
-      capability_evidence: build_capability_evidence,
-      context_evidence: Legion::Extensions::Llm::Inventory::ValueEvidence.new(
-        status: :known, value: 128_000, source: :provider_catalog
-      ),
-      max_output_evidence: absent,
-      embedding_dimensions_evidence: absent,
-      model_revision_evidence: absent,
-      tokenizer_evidence: absent,
-      quota_domains: {
-        chat: "azure:deployment:#{deployment_name}",
-        stream_chat: "azure:deployment:#{deployment_name}",
-        embed: "azure:deployment:#{deployment_name}"
-      },
-      metadata: { raw_deployment: deployment_name, model_family: :openai },
-      publication_source: :provider_static_catalog
-    )
-  end
-
-  def apply_azure_escalation(outcome:, error:)
-    if outcome.kind == :overloaded && model_not_ready_signal?(error: error)
-      return Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: :model_not_ready,
-                                                                   reason: outcome.reason)
-    end
-
-    outcome
-  end
-
-  def model_not_ready_signal?(error:)
-    return false unless error.respond_to?(:response) && error.response.is_a?(Hash)
-
-    body = error.response[:body].to_s.downcase
-    body.include?('model not ready') || body.include?('deployment is warming up')
+  def record(operation, model)
+    @received_models[operation] = model
+    {}
   end
 end
 
-# Harness class for Azure Foundry SSOT v3 conformance testing. Implements the full
-# interface required by the shared conformance examples without touching
-# any external service.
+# Harness class for Azure Foundry SSOT v3 conformance testing. Implements the
+# full interface required by the shared conformance examples without touching
+# any external service: the production AzureFoundryCallable is used, with the
+# per-instance Provider (HTTP boundary) replaced by a recording double.
+# Identity and offering-draft construction delegate to the production actor's
+# real helpers (no harness re-implementation that can drift).
 class AzureFoundrySsotHarness
-  include AzureFoundrySsotEvidenceHelpers
-
   INSTANCE_CONFIGS = [
     {
       azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
@@ -195,22 +116,24 @@ class AzureFoundrySsotHarness
   def instance_configs = INSTANCE_CONFIGS
 
   def instance_id(instance_config:)
-    endpoint = instance_config[:azure_foundry_endpoint] || instance_config[:endpoint] || 'https://localhost:443'
-    host_port = extract_host_port(base_url: endpoint)
-    api_key = instance_config[:azure_foundry_api_key] || instance_config.dig(:credentials, :api_key)
-
-    return host_port unless api_key.is_a?(String) && !api_key.strip.empty?
-
-    "#{host_port}/ak:#{::Digest::SHA256.hexdigest(api_key)[0, 6]}"
+    discovery_actor.send(:derive_instance_id, instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
-    TrackingAzureFoundryCallable.new(instance_cfg: instance_config, logger: Logger.new(File::NULL))
+    Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable.new(
+      instance_cfg: instance_config,
+      logger: Logger.new(File::NULL),
+      provider: RecordingAzureFoundryProvider.new
+    )
   end
 
-  def build_offering_drafts(tier: :cloud, **)
-    now = Time.now.freeze
-    [build_single_offering(deployment_name: 'gpt-4o-deployment', model_id: 'gpt-4o', tier: tier, now: now)]
+  def build_offering_drafts(instance_config: instance_configs.first, tier: :cloud, **)
+    config = instance_config.merge(tier: tier)
+    instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: provider_family,
+      instance_id: instance_id(instance_config: config)
+    )
+    discovery_actor.send(:discover_offerings_for_instance, instance_cfg: config, instance_key: instance_key)
   end
 
   def safe_readiness(instance_config:, **)
@@ -222,31 +145,46 @@ class AzureFoundrySsotHarness
   end
 
   def inference_call_count(callable:)
-    callable.respond_to?(:call_count) ? callable.call_count : 0
+    callable.provider.call_count
   end
 
+  # The production callable does all classification (base Llm error classes +
+  # the Azure EndpointDeactivated / model-not-ready body layers).
   def normalize_dispatch_error(error:)
-    callable = build_callable(instance_config: instance_configs.first)
-    outcome = callable.normalize_dispatch_error(error: error)
-    apply_azure_escalation(outcome: outcome, error: error)
+    build_callable(instance_config: instance_configs.first).normalize_dispatch_error(error: error)
   end
 
-  # §8: instance_unavailable comes only from an explicit Azure EndpointDeactivated code —
-  # not from ConnectionFailed, which is request-local.
+  # D17 production shape: dispatch errors arrive as Legion::Extensions::Llm
+  # errors whose wrapped response is a Faraday::Response (ErrorMiddleware),
+  # never a raw Faraday error with a Hash response.
   def instance_unavailable_error
-    response = { status: 503, headers: {},
-                 body: '{"error": {"code": "EndpointDeactivated", "message": "endpoint deactivated"}}' }
-    Faraday::ServerError.new('the server responded with status 503', response)
+    response = Faraday::Response.new(
+      status: 503,
+      body: '{"error": {"code": "EndpointDeactivated", "message": "endpoint deactivated"}}'
+    )
+    Legion::Extensions::Llm::ServiceUnavailableError.new(response, 'the server responded with status 503')
   end
 
   def overloaded_error
-    response = { status: 503, headers: {}, body: '{"error": "Server overloaded"}' }
-    Faraday::ServerError.new('the server responded with status 503', response)
+    response = Faraday::Response.new(status: 529, body: '{"error": "Server overloaded"}')
+    Legion::Extensions::Llm::OverloadedError.new(response, 'the server responded with status 529')
   end
 
   def model_not_ready_error
-    response = { status: 503, headers: {}, body: '{"error": "Model not ready", "detail": "deployment is warming up"}' }
-    Faraday::ServerError.new('the server responded with status 503 - deployment is warming up', response)
+    response = Faraday::Response.new(
+      status: 503,
+      body: '{"error": "Model not ready — deployment is warming up"}'
+    )
+    Legion::Extensions::Llm::ServiceUnavailableError.new(response, 'the server responded with status 503')
+  end
+
+  private
+
+  # Production discovery actor used as the source of the real identity and
+  # offering-draft helpers (no timer: the spec stub of Every has none, so
+  # instances are inert until driven manually).
+  def discovery_actor
+    @discovery_actor ||= Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh.new
   end
 end
 
@@ -263,14 +201,23 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   describe 'instance identity derivation' do
     it 'derives instance_id as host:port/ak:fingerprint with API key' do
       config = ssot_harness.instance_configs[0]
-      fingerprint = Digest::SHA256.hexdigest(config[:azure_foundry_api_key])[0, 6]
+      fingerprint = Legion::Extensions::Llm::CredentialSources.credential_fingerprint(
+        config[:azure_foundry_api_key]
+      )
       host_port = 'eastus-prod.services.ai.azure.com:443'
       expect(ssot_harness.instance_id(instance_config: config)).to eq("#{host_port}/ak:#{fingerprint}")
     end
 
     it 'derives instance_id as host:port without API key' do
-      config = { azure_foundry_endpoint: 'https://public.services.ai.azure.com' }
+      config = { azure_foundry_endpoint: 'https://public.services.ai.azure.com',
+                 azure_foundry_bearer_token: 'bearer-only' }
       expect(ssot_harness.instance_id(instance_config: config)).to eq('public.services.ai.azure.com:443')
+    end
+
+    it 'raises instead of falling back to a placeholder endpoint' do
+      expect do
+        ssot_harness.instance_id(instance_config: { azure_foundry_api_key: 'ak' })
+      end.to raise_error(ArgumentError, /azure_foundry_endpoint/)
     end
 
     it 'produces distinct instance IDs for two different endpoints' do
@@ -285,9 +232,20 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(id_a).to eq(id_b)
     end
 
+    it 'distinguishes two keys against the same endpoint via fingerprint' do
+      config_a = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+                   azure_foundry_api_key: 'ak-one' }
+      config_b = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+                   azure_foundry_api_key: 'ak-two' }
+      expect(ssot_harness.instance_id(instance_config: config_a))
+        .not_to eq(ssot_harness.instance_id(instance_config: config_b))
+    end
+
     it 'lowercases the host for normalized comparison' do
-      config_upper = { azure_foundry_endpoint: 'https://EastUS-Prod.Services.AI.Azure.COM' }
-      config_lower = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com' }
+      config_upper = { azure_foundry_endpoint: 'https://EastUS-Prod.Services.AI.Azure.COM',
+                       azure_foundry_api_key: 'ak-1' }
+      config_lower = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+                       azure_foundry_api_key: 'ak-1' }
       expect(ssot_harness.instance_id(instance_config: config_upper))
         .to eq(ssot_harness.instance_id(instance_config: config_lower))
     end
@@ -323,85 +281,14 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       lanes = snapshot.lanes_for(instance_key: ctx[:key])
       expect(lanes.size).to be >= 2
     end
-
-    private
-
-    def bring_up_instance(cfg, tier: :cloud)
-      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
-      inst_id = ssot_harness.instance_id(instance_config: cfg)
-      key = build_instance_key_for(provider_family: :azure_foundry, instance_id: inst_id)
-      callable = ssot_harness.build_callable(instance_config: cfg)
-      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
-      token = publisher.claim_instance(instance_id: inst_id, callable: callable,
-                                       probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: inst_id, publisher_token: token)
-      drafts = build_deployment_drafts(cfg: cfg, tier: tier, harness: ssot_harness)
-      publisher.activate_instance_snapshot(
-        instance_id: inst_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
-      )
-      { publisher: publisher, key: key, callable: callable, token: token, drafts: drafts }
-    end
-
-    def build_instance_key_for(provider_family:, instance_id:)
-      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: provider_family, instance_id: instance_id
-      )
-    end
-
-    def build_deployment_drafts(cfg:, tier:, harness:)
-      now = Time.now.freeze
-      cfg[:azure_foundry_deployments].map do |dep|
-        build_deployment_draft(dep: dep, tier: tier, now: now, harness: harness)
-      end
-    end
-
-    def build_deployment_draft(dep:, tier:, now:, harness:)
-      absent = Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :unknown, source: :absent)
-      embed = %w[embed embedding].include?((dep[:usage_type] || dep[:type]).to_s)
-      Legion::Extensions::Llm::Inventory::OfferingDraft.new(
-        provider_native_key: dep[:deployment], model: dep[:model], tier: tier,
-        operation_evidence: harness.send(:build_operation_evidence, now: now, embed_supported: embed),
-        capability_evidence: harness.send(:build_capability_evidence),
-        context_evidence: absent, max_output_evidence: absent,
-        embedding_dimensions_evidence: absent, model_revision_evidence: absent, tokenizer_evidence: absent,
-        quota_domains: { chat: "azure:deployment:#{dep[:deployment]}",
-                         stream_chat: "azure:deployment:#{dep[:deployment]}",
-                         embed: "azure:deployment:#{dep[:deployment]}" },
-        metadata: { raw_deployment: dep[:deployment] },
-        publication_source: :provider_static_catalog
-      )
-    end
   end
 
   # --- Same deployment on two endpoints ---
 
   describe 'same deployment on two endpoints' do
-    def bring_up(cfg)
-      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
-      inst_id = ssot_harness.instance_id(instance_config: cfg)
-      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :azure_foundry, instance_id: inst_id
-      )
-      callable = ssot_harness.build_callable(instance_config: cfg)
-      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
-
-      token = publisher.claim_instance(instance_id: inst_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: inst_id, publisher_token: token)
-      drafts = ssot_harness.build_offering_drafts(instance_config: cfg, callable: callable, tier: :cloud)
-      publisher.activate_instance_snapshot(
-        instance_id: inst_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
-      )
-
-      { publisher: publisher, key: key, callable: callable, token: token }
-    end
-
     it 'creates separate lanes for the same model on different instances' do
-      a = bring_up(ssot_harness.instance_configs[0])
-      b = bring_up(ssot_harness.instance_configs[1])
+      a = bring_up_instance(ssot_harness.instance_configs[0])
+      b = bring_up_instance(ssot_harness.instance_configs[1])
 
       snapshot = registry.snapshot
       lanes_a = snapshot.lanes_for(instance_key: a[:key])
@@ -569,30 +456,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   # --- Instance-unavailable isolation ---
 
   describe 'instance-unavailable isolation' do
-    def bring_up(cfg)
-      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
-      inst_id = ssot_harness.instance_id(instance_config: cfg)
-      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :azure_foundry, instance_id: inst_id
-      )
-      callable = ssot_harness.build_callable(instance_config: cfg)
-      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
-
-      token = publisher.claim_instance(instance_id: inst_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: inst_id, publisher_token: token)
-      drafts = ssot_harness.build_offering_drafts(instance_config: cfg, callable: callable, tier: :cloud)
-      publisher.activate_instance_snapshot(
-        instance_id: inst_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
-      )
-
-      { publisher: publisher, key: key, callable: callable, token: token }
-    end
-
     it 'marks only one instance unavailable without affecting the other' do
-      a = bring_up(ssot_harness.instance_configs[0])
-      b = bring_up(ssot_harness.instance_configs[1])
+      a = bring_up_instance(ssot_harness.instance_configs[0])
+      b = bring_up_instance(ssot_harness.instance_configs[1])
 
       registry.dispatch_instance_unavailable(
         instance_key: a[:key],
@@ -604,94 +470,110 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(registry.snapshot.instance(instance_key: b[:key]).availability.state).to eq(:available)
     end
 
-    # §8: ConnectionFailed is request-local — the callable returns :connection_failure,
-    # never :instance_unavailable. Only an explicit EndpointDeactivated error promotes to
-    # instance_unavailable.
+    # §8: ConnectionFailed is request-local — the callable returns
+    # :connection_failure, never :instance_unavailable. Only an explicit
+    # EndpointDeactivated body promotes to instance_unavailable.
     it 'normalizes connection failure as connection_failure on the callable (not instance_unavailable)' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::ConnectionFailed.new('Connection refused - connect(2) for eastus-prod.services.ai.azure.com:443')
+      error = Faraday::ConnectionFailed.new('Connection refused - eastus-prod.services.ai.azure.com:443')
       outcome = callable.normalize_dispatch_error(error: error)
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
       expect(outcome.kind).to eq(:connection_failure)
     end
 
-    it 'normalizes 503 as overloaded, never as instance_unavailable' do
-      outcome = ssot_harness.normalize_dispatch_error(error: ssot_harness.overloaded_error)
-      expect(outcome.kind).to eq(:overloaded)
+    it 'normalizes an Llm 503 as provider_error, never as instance_unavailable' do
+      outcome = ssot_harness.normalize_dispatch_error(
+        error: Legion::Extensions::Llm::ServiceUnavailableError.new('503 service unavailable')
+      )
+      expect(outcome.kind).to eq(:provider_error)
       expect(outcome.kind).not_to eq(:instance_unavailable)
+    end
+
+    # D17: the production error shape (Llm error wrapping a Faraday::Response)
+    # is what reaches the callable from ErrorMiddleware — the explicit
+    # EndpointDeactivated body is read from that wrapped response.
+    it 'promotes an Llm ServiceUnavailableError with an EndpointDeactivated body to instance_unavailable' do
+      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
+      outcome = callable.normalize_dispatch_error(error: ssot_harness.instance_unavailable_error)
+      expect(outcome.kind).to eq(:instance_unavailable)
+    end
+
+    # D8: a raw Faraday error (connection-level path) carries its response as a
+    # Faraday::Env, not a Hash — body detection must handle that real shape.
+    it 'reads the EndpointDeactivated body from a raw Faraday error (Env response, not a Hash)' do
+      env = Faraday::Env.new
+      env.status = 503
+      env.body = '{"error": {"code": "EndpointDeactivated", "message": "endpoint deactivated"}}'
+      error = Faraday::ServerError.new('the server responded with status 503', env)
+      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
+      outcome = callable.normalize_dispatch_error(error: error)
+      expect(outcome.kind).to eq(:instance_unavailable)
     end
   end
 
-  # --- Error classification ---
+  # --- Error classification (production error shapes) ---
 
   describe 'error classification' do
+    let(:callable) { ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0]) }
+
+    def llm_error(klass, status, body)
+      response = Faraday::Response.new(status: status, body: body)
+      klass.new(response, "the server responded with status #{status}")
+    end
+
     it 'classifies connection failure as connection_failure on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::ConnectionFailed.new('Connection refused')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: Faraday::ConnectionFailed.new('Connection refused'))
       expect(outcome.kind).to eq(:connection_failure)
     end
 
     it 'classifies timeout as timeout on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = Faraday::TimeoutError.new('Net::ReadTimeout')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: Faraday::TimeoutError.new('Net::ReadTimeout'))
       expect(outcome.kind).to eq(:timeout)
     end
 
     it 'classifies generic errors as provider_error on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      error = RuntimeError.new('unexpected failure')
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: RuntimeError.new('unexpected failure'))
       expect(outcome.kind).to eq(:provider_error)
     end
 
     it 'classifies 401 as authentication on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 401, headers: {}, body: '' }
-      error = Faraday::ClientError.new('401', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: llm_error(Legion::Extensions::Llm::UnauthorizedError, 401, ''))
       expect(outcome.kind).to eq(:authentication)
     end
 
     it 'classifies 403 as authorization on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 403, headers: {}, body: '' }
-      error = Faraday::ClientError.new('403', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: llm_error(Legion::Extensions::Llm::ForbiddenError, 403, ''))
       expect(outcome.kind).to eq(:authorization)
     end
 
-    it 'classifies 404 as model_missing on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 404, headers: {}, body: '' }
-      error = Faraday::ClientError.new('404', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+    it 'classifies a 404 as model_missing on the callable (unknown deployment)' do
+      outcome = callable.normalize_dispatch_error(error: llm_error(Legion::Extensions::Llm::Error, 404, ''))
       expect(outcome.kind).to eq(:model_missing)
     end
 
     it 'classifies 429 as rate_limited on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 429, headers: {}, body: '' }
-      error = Faraday::ClientError.new('429', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+      outcome = callable.normalize_dispatch_error(error: llm_error(Legion::Extensions::Llm::RateLimitError, 429, ''))
       expect(outcome.kind).to eq(:rate_limited)
     end
 
-    it 'classifies 503 ServerError as overloaded on the callable' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
-      response = { status: 503, headers: {}, body: '' }
-      error = Faraday::ServerError.new('503', response)
-      outcome = callable.normalize_dispatch_error(error: error)
+    it 'classifies 529 as overloaded on the callable' do
+      outcome = callable.normalize_dispatch_error(error: ssot_harness.overloaded_error)
       expect(outcome.kind).to eq(:overloaded)
     end
 
-    it 'never returns instance_unavailable from the callable for any server error' do
-      callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
+    it 'classifies a model-not-ready 503 body as model_not_ready (request-local)' do
+      outcome = callable.normalize_dispatch_error(error: ssot_harness.model_not_ready_error)
+      expect(outcome.kind).to eq(:model_not_ready)
+      expect(outcome.kind).not_to eq(:instance_unavailable)
+    end
+
+    it 'never returns instance_unavailable from the callable for any plain server error' do
       [500, 502, 503, 504, 529].each do |status|
-        response = { status: status, headers: {}, body: '' }
-        error = Faraday::ServerError.new(status.to_s, response)
-        outcome = callable.normalize_dispatch_error(error: error)
+        error = case status
+                when 529 then Legion::Extensions::Llm::OverloadedError
+                else Legion::Extensions::Llm::ServiceUnavailableError
+                end
+        outcome = callable.normalize_dispatch_error(error: llm_error(error, status, ''))
         expect(outcome.kind).not_to eq(:instance_unavailable),
                                     "status #{status} should not map to instance_unavailable"
       end
@@ -720,32 +602,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   describe 'exact fleet worker execution contract' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:inst_id) { ssot_harness.instance_id(instance_config: config) }
-    let(:key) do
-      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :azure_foundry, instance_id: inst_id
-      )
-    end
 
     def activate_offering
-      publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
-      callable = ssot_harness.build_callable(instance_config: config)
-      token = claim_and_activate(publisher: publisher, callable: callable)
-      offering = registry.snapshot.offerings_for(instance_key: key).first
-      { publisher: publisher, token: token, offering: offering, callable: callable }
-    end
-
-    def claim_and_activate(publisher:, callable:)
-      coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-        instance_key: key, enqueue: ->(**) { true }
-      )
-      token = publisher.claim_instance(instance_id: inst_id, callable: callable, probe_request_handle: coordinator)
-      probe = publisher.readiness_probe_started(instance_id: inst_id, publisher_token: token)
-      drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :cloud)
-      publisher.activate_instance_snapshot(
-        instance_id: inst_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
-      )
-      token
+      ctx = bring_up_instance(config)
+      offering = registry.snapshot.offerings_for(instance_key: ctx[:key]).first
+      { publisher: ctx[:publisher], token: ctx[:token], offering:, callable: ctx[:callable], key: ctx[:key] }
     end
 
     before do
@@ -756,8 +617,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'rejects a mismatched offering_id' do
-      activate_offering
-      envelope = mismatched_offering_id_envelope(model: 'gpt-4o')
+      ctx = activate_offering
+      envelope = mismatched_offering_id_envelope(ctx: ctx)
       expect do
         Legion::Extensions::Llm::Fleet::WorkerExecution.call(envelope: envelope, registry: registry)
       end.to raise_error(Legion::Extensions::Llm::Inventory::Errors::ExactOfferingMismatchError)
@@ -781,8 +642,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
     it 'rejects an unavailable instance' do
       ctx = activate_offering
-      registry.dispatch_instance_unavailable(instance_key: key, publisher_token_id: ctx[:token].publisher_token_id,
-                                             reason: 'server down')
+      registry.dispatch_instance_unavailable(
+        instance_key: ctx[:key], publisher_token_id: ctx[:token].publisher_token_id, reason: 'server down'
+      )
       envelope = available_offering_envelope(ctx: ctx)
       expect do
         Legion::Extensions::Llm::Fleet::WorkerExecution.call(envelope: envelope, registry: registry)
@@ -796,23 +658,17 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
         offering_id: ctx[:offering].offering_id,
         provider: 'azure_foundry',
-        provider_instance: inst_id,
+        provider_instance: ctx[:key].instance_id,
         model: ctx[:offering].model,
         operation: 'chat',
         params: { messages: [] }
       }
     end
 
-    def mismatched_offering_id_envelope(model:)
-      {
-        execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
-        offering_id: 'off:v1:0000000000000000000000000000000000000000000000000000000000000000',
-        provider: 'azure_foundry',
-        provider_instance: inst_id,
-        model: model,
-        operation: 'chat',
-        params: { messages: [] }
-      }
+    def mismatched_offering_id_envelope(ctx:)
+      fleet_base_envelope(ctx: ctx).merge(
+        offering_id: 'off:v1:0000000000000000000000000000000000000000000000000000000000000000'
+      )
     end
 
     def unsupported_operation_envelope(ctx:)
@@ -889,6 +745,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(callable).to respond_to(:disconnected?)
     end
 
+    it 'responds to the fleet dispatch operations' do
+      expect(callable).to respond_to(:chat)
+      expect(callable).to respond_to(:stream_chat)
+      expect(callable).to respond_to(:embed)
+      expect(callable).to respond_to(:count_tokens)
+    end
+
     it 'responds to normalize_dispatch_error with kwargs' do
       expect(callable).to respond_to(:normalize_dispatch_error)
     end
@@ -902,6 +765,17 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(callable.disconnected?).to be(true)
     end
 
+    it 'closes the wrapped provider on disconnect' do
+      provider = instance_spy(Legion::Extensions::Llm::AzureFoundry::Provider)
+      subject_callable = described_class.new(
+        instance_cfg: ssot_harness.instance_configs[0],
+        logger: Logger.new(File::NULL),
+        provider:
+      )
+      subject_callable.disconnect
+      expect(provider).to have_received(:disconnect)
+    end
+
     it 'returns a ProviderOutcome from normalize_dispatch_error' do
       outcome = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
@@ -909,11 +783,73 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(outcome.reason).to be_a(String)
     end
 
-    it 'truncates reason to 512 bytes' do
-      long_message = 'x' * 1000
-      error = RuntimeError.new(long_message)
-      outcome = callable.normalize_dispatch_error(error: error)
+    it 'keeps the reason bounded' do
+      outcome = callable.normalize_dispatch_error(error: RuntimeError.new('x' * 1000))
       expect(outcome.reason.length).to be <= 1024
+    end
+
+    describe 'fleet raw-string model (D15)' do
+      # The fleet passes model: as the offering's raw model id (String). The
+      # chat/stream_chat render path calls model.id (stock
+      # OpenAICompatible#render_payload), so the callable must hand the
+      # provider a Model::Info there; embed/count_tokens are string-tolerant
+      # (Provider#model_id accepts the value verbatim), so wrapping them would
+      # serialize a Data object into the wire payload or response.
+      let(:capturing) { ModelCapturingAzureFoundryProvider.new }
+      let(:capturing_callable) do
+        described_class.new(
+          instance_cfg: ssot_harness.instance_configs[0],
+          logger: Logger.new(File::NULL),
+          provider: capturing
+        )
+      end
+
+      it 'wraps a raw string model into a Model::Info for chat' do
+        capturing_callable.chat(messages: [{ role: 'user', content: 'hi' }], model: 'gpt-4o')
+
+        model = capturing.received_models[:chat]
+        expect(model).to be_a(Legion::Extensions::Llm::Model::Info)
+        expect(model.id).to eq('gpt-4o')
+        expect(model.provider).to eq(:azure_foundry)
+      end
+
+      it 'wraps a raw string model into a Model::Info for stream_chat' do
+        capturing_callable.stream_chat(messages: [], model: 'gpt-4o')
+
+        model = capturing.received_models[:stream_chat]
+        expect(model).to be_a(Legion::Extensions::Llm::Model::Info)
+        expect(model.id).to eq('gpt-4o')
+      end
+
+      it 'forwards the stream block to the provider' do
+        streamed = []
+        block_capturing = Class.new do
+          define_method(:stream) do |**, &block|
+            block.call({ delta: 'chunk' })
+          end
+        end.new
+        block_callable = described_class.new(
+          instance_cfg: ssot_harness.instance_configs[0],
+          logger: Logger.new(File::NULL),
+          provider: block_capturing
+        )
+        block_callable.stream_chat(messages: [], model: 'gpt-4o') { |chunk| streamed << chunk }
+        expect(streamed).to eq([{ delta: 'chunk' }])
+      end
+
+      it 'passes a Model::Info through unchanged for chat' do
+        info = Legion::Extensions::Llm::Model::Info.new(id: 'gpt-4o', provider: :azure_foundry)
+        capturing_callable.chat(messages: [], model: info)
+        expect(capturing.received_models[:chat]).to equal(info)
+      end
+
+      it 'passes the raw model verbatim for embed and count_tokens' do
+        capturing_callable.embed(text: 'hello', model: 'text-embedding-3-small')
+        capturing_callable.count_tokens(messages: [], model: 'gpt-4o')
+
+        expect(capturing.received_models[:embed]).to eq('text-embedding-3-small')
+        expect(capturing.received_models[:count_tokens]).to eq('gpt-4o')
+      end
     end
   end
 
@@ -953,6 +889,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         end
       end
     end
+
+    it 'keeps provider_native_key (deployment) distinct from model' do
+      drafts.each do |draft|
+        expect(draft.provider_native_key).to eq('gpt-4o-deployment')
+        expect(draft.model).to eq('gpt-4o')
+      end
+    end
   end
 
   # --- ReadinessResult contract ---
@@ -975,5 +918,29 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       ssot_harness.safe_readiness(instance_config: config, callable: callable)
       expect(ssot_harness.inference_call_count(callable: callable)).to eq(0)
     end
+  end
+
+  private
+
+  # Claims and activates one instance through the public Publisher API using
+  # the production callable + the actor's real offering builders.
+  def bring_up_instance(config, tier: :cloud)
+    publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
+    inst_id = ssot_harness.instance_id(instance_config: config)
+    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :azure_foundry, instance_id: inst_id
+    )
+    callable = ssot_harness.build_callable(instance_config: config)
+    coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+      instance_key: key, enqueue: ->(**) { true }
+    )
+    token = publisher.claim_instance(instance_id: inst_id, callable: callable,
+                                     probe_request_handle: coordinator)
+    probe = publisher.readiness_probe_started(instance_id: inst_id, publisher_token: token)
+    drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: tier)
+    publisher.activate_instance_snapshot(
+      instance_id: inst_id, publisher_token: token, offerings: drafts, sequence: 0, probe_token: probe
+    )
+    { publisher:, key:, callable:, token:, drafts: }
   end
 end

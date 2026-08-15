@@ -1,24 +1,29 @@
 # frozen_string_literal: true
 
-require 'digest'
 require 'uri'
-
-begin
-  require 'legion/extensions/actors/every'
-rescue LoadError => e
-  warn(e.message) if $VERBOSE
-end
+require 'time'
+require 'concurrent'
+require 'faraday'
 
 require 'legion/extensions/llm/inventory/publisher'
 require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
 require 'legion/extensions/llm/inventory/evidence'
 require 'legion/extensions/llm/inventory/probe_coordinator'
+require 'legion/extensions/llm/inventory/scoped_refresher'
 require 'legion/extensions/llm/routing/provider_outcome'
 require 'legion/extensions/llm/taxonomies'
 require 'legion/extensions/llm/capabilities'
 
-return unless defined?(Legion::Extensions::Actors::Every)
+begin
+  require 'legion/extensions/actors/every'
+rescue LoadError => e
+  Legion::Logging.warn("[azure_foundry] LegionIO actor runtime unavailable: #{e.message}")
+end
+
+unless defined?(Legion::Extensions::Actors::Every)
+  raise LoadError, 'LegionIO actor runtime is required for the Azure Foundry discovery actor'
+end
 
 module Legion
   module Extensions
@@ -26,17 +31,21 @@ module Legion
       module AzureFoundry
         module Actor
           # Health-check helpers — non-billable readiness operations only.
+          # Readiness is a non-inference GET of the model catalog
+          # (models/info or /openai/v1/models), never a chat/embed call.
           module HealthCheckHelpers
             private
 
             def check_health(instance_cfg:)
-              endpoint = instance_cfg[:azure_foundry_endpoint] || instance_cfg[:endpoint]
+              endpoint = instance_cfg[:azure_foundry_endpoint]
               conn = build_health_connection(endpoint: endpoint, instance_cfg: instance_cfg)
               response = conn.get(health_path(instance_cfg: instance_cfg))
               build_readiness_from_response(response: response, endpoint: endpoint)
-            rescue Faraday::ConnectionFailed => e
-              readiness_failure(reason: "Azure Foundry health connection failed: #{e.message}", error: e)
+            rescue Faraday::ConnectionFailed, Faraday::TimeoutError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.check_health')
+              readiness_failure(reason: "Azure Foundry health network error: #{e.message}", error: e)
             rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.check_health')
               readiness_failure(reason: "Azure Foundry health error: #{e.message}", error: e)
             end
 
@@ -49,10 +58,11 @@ module Legion
             end
 
             def build_readiness_from_response(response:, endpoint:)
+              status = http_status(response)
               Legion::Extensions::Llm::Inventory::ReadinessResult.new(
-                ready: response.status == 200,
-                reason: "Azure Foundry health returned #{response.status}",
-                metadata: { status: response.status, endpoint: endpoint.to_s }
+                ready: status == 200,
+                reason: "Azure Foundry health returned #{status}",
+                metadata: { status: status, endpoint: endpoint.to_s }
               )
             end
 
@@ -63,7 +73,6 @@ module Legion
             end
 
             def build_health_connection(endpoint:, instance_cfg:)
-              require 'faraday'
               base = normalize_endpoint_for_connection(endpoint: endpoint, instance_cfg: instance_cfg)
               Faraday.new(url: base) do |f|
                 f.options.timeout = 10
@@ -74,7 +83,9 @@ module Legion
             end
 
             def normalize_endpoint_for_connection(endpoint:, instance_cfg:)
-              url = (endpoint || 'https://localhost').to_s.sub(%r{/*\z}, '')
+              url = endpoint.to_s.sub(%r{/*\z}, '')
+              raise ArgumentError, 'azure_foundry_endpoint is required for the health connection' if url.strip.empty?
+
               surface = (instance_cfg[:azure_foundry_surface] || instance_cfg[:surface] || :model_inference).to_sym
               return "#{url}/openai/v1" if surface == :openai_v1 && !url.end_with?('/openai/v1')
 
@@ -84,6 +95,14 @@ module Legion
             def apply_auth_headers(faraday:, instance_cfg:)
               api_key = instance_cfg[:azure_foundry_api_key]
               faraday.headers['api-key'] = api_key if api_key.is_a?(String) && !api_key.strip.empty?
+            end
+
+            # Accepts the real Faraday shapes (Faraday::Response from conn.get,
+            # Faraday::Env on error paths) as well as a plain Hash.
+            def http_status(response)
+              return response[:status] if response.is_a?(Hash)
+
+              response.status
             end
           end
 
@@ -192,14 +211,31 @@ module Legion
             end
           end
 
-          # Offering draft builders — assembles complete OfferingDraft for each deployment.
+          # Offering draft builders — assembles complete OfferingDrafts for each
+          # deployment of an instance.
           module OfferingBuilderHelpers
             include CapabilityEvidenceHelpers
             include DeploymentParserHelpers
 
             private
 
+            # D16: programming errors (NameError/NoMethodError/ArgumentError) are
+            # bugs in the builder, not "no offerings" — they must fail loud. Only
+            # runtime errors may degrade to an empty set.
             def discover_offerings_for_instance(instance_cfg:, instance_key:)
+              build_offering_set(instance_cfg: instance_cfg, instance_key: instance_key)
+            rescue StandardError => e
+              raise e if programming_error?(e)
+
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discover_offerings')
+              []
+            end
+
+            def programming_error?(error)
+              error.is_a?(NameError) || error.is_a?(NoMethodError) || error.is_a?(ArgumentError)
+            end
+
+            def build_offering_set(instance_cfg:, instance_key:)
               configured_deployments(instance_cfg: instance_cfg).filter_map do |deployment|
                 deployment_name = deployment[:deployment] || deployment[:model]
                 next if deployment_name.nil? || deployment_name.to_s.strip.empty?
@@ -207,9 +243,6 @@ module Legion
                 build_offering_draft(deployment: deployment, deployment_name: deployment_name.to_s,
                                      instance_cfg: instance_cfg, instance_key: instance_key)
               end
-            rescue StandardError => e
-              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discover_offerings')
-              []
             end
 
             def build_offering_draft(deployment:, deployment_name:, instance_cfg:, instance_key:)
@@ -228,7 +261,7 @@ module Legion
                 tokenizer_evidence: absent_value_evidence,
                 quota_domains: build_quota_domains(deployment_name: deployment_name),
                 metadata: build_offering_metadata(deployment: deployment, deployment_name: deployment_name,
-                                                  instance_key: instance_key),
+                                                  instance_key: instance_key).freeze,
                 publication_source: :provider_static_catalog
               )
             end
@@ -272,93 +305,125 @@ module Legion
             end
           end
 
-          # Configuration helpers — read registered settings without .dig or || guards.
-          module InstanceConfigHelpers
+          # Offerings change detection. Time.now observed_at stamps in the
+          # evidence poison Data#==, so a rebuilt-but-unchanged catalog would
+          # otherwise replace the snapshot (and bump the sequence) every tick.
+          # Compare identity/status fields only.
+          module OfferingComparisonHelpers
             private
 
-            # Returns all explicitly configured instances that have a non-blank endpoint.
-            # The registered default_settings entry (instances[:default] with endpoint: nil)
-            # is skipped; operators configure named instances in settings[:instances].
-            def configured_instances
-              instances = {}
-              cfg_instances = settings[:instances]
-              return instances unless cfg_instances.is_a?(Hash)
+            def offerings_changed?(previous:, current:)
+              return true unless previous.size == current.size
 
-              cfg_instances.each do |name, config|
-                normalized = normalize_instance_config(config: config)
-                ep = normalized[:azure_foundry_endpoint]
-                next if ep.nil? || ep.to_s.strip.empty?
-
-                instances[name.to_sym] = normalized
+              current.any? do |draft|
+                previous.none? { |candidate| drafts_stable?(candidate, draft) }
               end
-              instances
             end
 
-            def normalize_instance_config(config:)
-              normalized = config.to_h.transform_keys(&:to_sym)
-              resolve_azure_endpoint(normalized: normalized)
-              resolve_azure_credentials(normalized: normalized)
-              resolve_azure_provider_settings(normalized: normalized)
-              normalized[:tier] ||= :cloud
-              normalized
+            def drafts_stable?(candidate, draft)
+              basic_fields_stable?(candidate, draft) &&
+                evidence_maps_stable?(candidate.operation_evidence, draft.operation_evidence) &&
+                evidence_maps_stable?(candidate.capability_evidence, draft.capability_evidence) &&
+                value_fields_stable?(candidate, draft) &&
+                candidate.quota_domains == draft.quota_domains &&
+                candidate.metadata == draft.metadata
             end
 
-            def resolve_azure_endpoint(normalized:)
-              normalized[:azure_foundry_endpoint] ||= normalized.delete(:endpoint)
-              normalized[:azure_foundry_endpoint] ||= normalized.delete(:base_url)
-              normalized[:azure_foundry_endpoint] ||= normalized.delete(:api_base)
+            def basic_fields_stable?(candidate, draft)
+              candidate.model == draft.model &&
+                candidate.tier == draft.tier &&
+                evidence_key_set_stable?(candidate.operation_evidence, draft.operation_evidence) &&
+                evidence_key_set_stable?(candidate.capability_evidence, draft.capability_evidence)
             end
 
-            def resolve_azure_credentials(normalized:)
-              creds = normalized.delete(:credentials)
-              if creds.is_a?(Hash)
-                creds = creds.transform_keys(&:to_sym)
-                normalized[:azure_foundry_api_key] ||= creds[:api_key]
+            def evidence_key_set_stable?(previous_map, current_map)
+              previous_map.keys.sort == current_map.keys.sort
+            end
+
+            def evidence_maps_stable?(previous_map, current_map)
+              previous_map.all? do |key, evidence|
+                other = current_map[key]
+                other&.status == evidence.status && other&.source == evidence.source
               end
-              normalized[:azure_foundry_api_key] ||= normalized.delete(:api_key)
             end
 
-            def resolve_azure_provider_settings(normalized:)
-              apply_nested_provider(normalized: normalized)
-              normalized[:azure_foundry_surface] ||= normalized.delete(:surface)
-              normalized[:azure_foundry_api_version] ||= normalized.delete(:api_version)
-              normalized[:azure_foundry_deployments] ||= normalized.delete(:deployments)
+            def value_fields_stable?(candidate, draft)
+              values_stable?(candidate.context_evidence, draft.context_evidence) &&
+                values_stable?(candidate.max_output_evidence, draft.max_output_evidence) &&
+                values_stable?(candidate.embedding_dimensions_evidence, draft.embedding_dimensions_evidence) &&
+                values_stable?(candidate.model_revision_evidence, draft.model_revision_evidence)
             end
 
-            def apply_nested_provider(normalized:)
-              prov = normalized.delete(:provider)
-              return unless prov.is_a?(Hash)
-
-              prov = prov.transform_keys(&:to_sym)
-              normalized[:azure_foundry_surface] ||= prov[:surface]
-              normalized[:azure_foundry_api_version] ||= prov[:api_version]
-              normalized[:azure_foundry_deployments] ||= prov[:deployments]
+            def values_stable?(previous_value, current_value)
+              previous_value.status == current_value.status &&
+                previous_value.value == current_value.value &&
+                previous_value.source == current_value.source
             end
           end
 
-          # Instance ID derivation from endpoint + credential fingerprint.
+          # Configuration helpers. The single source of configured instances is
+          # the module-level AzureFoundry.discover_instances (the same reader the
+          # fleet responder uses); the actor only filters to claimable entries.
+          module InstanceConfigHelpers
+            private
+
+            # Claimable instances: enabled, with a non-blank endpoint (already
+            # enforced by discover_instances) and at least one credential. The
+            # synthetic instances.default placeholder (endpoint: nil) and
+            # credential-less entries are skipped, never claimed.
+            def configured_instances
+              Legion::Extensions::Llm::AzureFoundry.discover_instances.filter do |name, instance_cfg|
+                claimable_instance?(name: name, instance_cfg: instance_cfg)
+              end
+            end
+
+            def claimable_instance?(name:, instance_cfg:)
+              if instance_cfg[:enabled] == false
+                log.warn("[azure_foundry] skipping instance #{name}: disabled")
+                return false
+              end
+              return true if instance_credential?(instance_cfg)
+
+              log.warn("[azure_foundry] skipping instance #{name}: no API credential configured")
+              false
+            end
+
+            def instance_credential?(instance_cfg)
+              credential_string?(instance_cfg[:azure_foundry_api_key]) ||
+                credential_string?(instance_cfg[:azure_foundry_bearer_token])
+            end
+
+            def credential_string?(value)
+              value.is_a?(String) && !value.strip.empty?
+            end
+          end
+
+          # Instance ID derivation from endpoint + credential fingerprint. The
+          # derived instance_id identifies the exact endpoint + credential that
+          # can independently become unavailable — never a provider-family or
+          # localhost fallback.
           module InstanceIdentityHelpers
             private
 
             def derive_instance_id(instance_cfg:)
-              endpoint = instance_cfg[:azure_foundry_endpoint] || 'https://localhost:443'
+              endpoint = instance_cfg[:azure_foundry_endpoint]
+              raise ArgumentError, 'azure_foundry_endpoint is required to derive the instance id' unless
+                credential_string?(endpoint)
+
               host_port = extract_host_port(url: endpoint)
               api_key = instance_cfg[:azure_foundry_api_key]
+              return host_port unless credential_string?(api_key)
 
-              return "#{host_port}/ak:#{::Digest::SHA256.hexdigest(api_key)[0, 6]}" if
-                api_key.is_a?(String) && !api_key.strip.empty?
-
-              host_port
+              "#{host_port}/ak:#{Legion::Extensions::Llm::CredentialSources.credential_fingerprint(api_key)}"
             end
 
             def extract_host_port(url:)
               uri = URI.parse(url.to_s)
               host = (uri.host || 'localhost').downcase
-              port = uri.port
-              "#{host}:#{port}"
+              "#{host}:#{uri.port}"
             rescue URI::InvalidURIError => e
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.extract_host_port',
-                                  url: url.to_s[0, 200])
+                                  url: url.to_s)
               raise
             end
           end
@@ -376,7 +441,9 @@ module Legion
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe
-              report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              report_probe_result(
+                instance_id: instance_id, probe_token: probe_token, readiness: readiness, state: state
+              )
             rescue StandardError => e
               finish_probe_safely(coordinator: coordinator)
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.cadence_probe',
@@ -384,7 +451,7 @@ module Legion
             end
 
             def handle_reactive_probe(instance_id:, request:)
-              state = @instance_states[instance_id]
+              state = @instance_states && @instance_states[instance_id]
               return unless state
 
               coordinator = state[:probe_coordinator]
@@ -395,7 +462,9 @@ module Legion
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe(request: request)
-              report_probe_result(instance_id: instance_id, probe_token: probe_token, readiness: readiness)
+              report_probe_result(
+                instance_id: instance_id, probe_token: probe_token, readiness: readiness, state: state
+              )
             rescue StandardError => e
               finish_probe_safely(coordinator: coordinator, request: request)
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.reactive_probe',
@@ -409,12 +478,22 @@ module Legion
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.finish_probe_cleanup')
             end
 
-            def report_probe_result(instance_id:, probe_token:, readiness:)
+            def report_probe_result(instance_id:, probe_token:, readiness:, state:)
               if readiness.ready?
                 publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token)
+                state[:last_probe_outcome] = :success
+                write_instance_health(
+                  config_name: state[:name], available: true, reason: 'readiness probe succeeded',
+                  probe_outcome: :success, source: :readiness_probe
+                )
               else
                 publisher.readiness_failed(instance_id: instance_id, probe_token: probe_token,
                                            reason: readiness.reason)
+                state[:last_probe_outcome] = :failure
+                write_instance_health(
+                  config_name: state[:name], available: false, reason: readiness.reason,
+                  probe_outcome: :failure, source: :readiness_probe
+                )
               end
             end
 
@@ -441,6 +520,7 @@ module Legion
                 publisher.remove_instance(
                   instance_id: instance_id, publisher_token: state[:publisher_token]
                 )
+                clear_instance_health(config_name: state[:name])
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'azure_foundry.actor.remove_instance',
                                     instance_id: instance_id)
@@ -449,36 +529,54 @@ module Legion
             end
           end
 
-          # Per-instance activation helpers — claim, probe, snapshot, and state tracking.
+          # Per-instance activation helpers — claim, state tracking, removal.
           module ActivationHelpers
             private
 
             def publisher
-              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
+              @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
+                provider_family: :azure_foundry,
+                compatibility_adapter: Legion::Extensions::Llm::Inventory::ScopedRefresher::LegacyCoordinatorAdapter.new(
+                  provider_family: :azure_foundry
+                )
+              )
             end
 
-            def initial_discovery
-              @instance_states = {}
-              configured_instances.each do |name, instance_cfg|
-                claim_and_activate_instance(name: name, instance_cfg: instance_cfg)
+            def claim_new_instances(discovered)
+              discovered.each do |name, instance_cfg|
+                instance_id = derive_instance_id(instance_cfg: instance_cfg)
+                next if @instance_states.key?(instance_id)
+
+                @instance_states[instance_id] = build_instance_context(
+                  name: name, instance_id: instance_id, instance_cfg: instance_cfg
+                )
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'azure_foundry.actor.claim_instance',
                                     instance_name: name.to_s)
               end
             end
 
-            def claim_and_activate_instance(name:, instance_cfg:)
-              instance_id = derive_instance_id(instance_cfg: instance_cfg)
+            def release_removed_instances(discovered)
+              discovered_ids = discovered.values.map { |cfg| derive_instance_id(instance_cfg: cfg) }.uniq
+              (@instance_states.keys - discovered_ids).each { |instance_id| remove_instance_state(instance_id) }
+            end
+
+            def build_instance_context(name:, instance_id:, instance_cfg:)
               instance_key = build_instance_key(instance_id: instance_id)
-              setup = build_instance_setup(instance_id: instance_id, instance_cfg: instance_cfg,
-                                           instance_key: instance_key)
-              offerings = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
-              probe_token = publisher.readiness_probe_started(instance_id: instance_id,
-                                                              publisher_token: setup[:publisher_token])
-              probe_and_activate(instance_id: instance_id, instance_cfg: instance_cfg, setup: setup,
-                                 probe_token: probe_token, offerings: offerings)
-              store_instance_state(instance_id: instance_id, name: name, instance_key: instance_key,
-                                   instance_cfg: instance_cfg, setup: setup.merge(offerings: offerings))
+              callable = Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable.new(
+                instance_cfg: instance_cfg, logger: log
+              )
+              probe_coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+                instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
+              )
+              publisher_token = publisher.claim_instance(instance_id: instance_id, callable: callable,
+                                                         probe_request_handle: probe_coordinator)
+              {
+                name: name, instance_key: instance_key, instance_cfg: instance_cfg,
+                callable: callable, probe_coordinator: probe_coordinator,
+                publisher_token: publisher_token, sequence: 0, last_probe_outcome: nil,
+                offerings: discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
+              }
             end
 
             def build_instance_key(instance_id:)
@@ -487,43 +585,25 @@ module Legion
               )
             end
 
-            def build_instance_setup(instance_id:, instance_cfg:, instance_key:)
-              callable = AzureFoundryCallable.new(instance_cfg: instance_cfg, logger: log)
-              coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
-                instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
-              )
-              publisher_token = publisher.claim_instance(instance_id: instance_id, callable: callable,
-                                                         probe_request_handle: coordinator)
-              { callable: callable, probe_coordinator: coordinator, publisher_token: publisher_token }
-            end
+            def remove_instance_state(instance_id)
+              state = @instance_states.delete(instance_id)
+              return unless state
 
-            def probe_and_activate(instance_id:, instance_cfg:, setup:, probe_token:, offerings:)
-              readiness = check_health(instance_cfg: instance_cfg)
-              if readiness.ready?
-                publisher.activate_instance_snapshot(
-                  instance_id: instance_id, publisher_token: setup[:publisher_token],
-                  offerings: offerings, sequence: 0, probe_token: probe_token
-                )
-              else
-                publisher.readiness_failed(instance_id: instance_id, probe_token: probe_token,
-                                           reason: readiness.reason)
-              end
-            end
-
-            def store_instance_state(instance_id:, name:, instance_key:, instance_cfg:, setup:)
-              @instance_states[instance_id] = {
-                name: name, instance_key: instance_key, instance_cfg: instance_cfg,
-                callable: setup[:callable], probe_coordinator: setup[:probe_coordinator],
-                publisher_token: setup[:publisher_token], sequence: 0, offerings: setup[:offerings]
-              }
+              publisher.remove_instance(instance_id: instance_id, publisher_token: state[:publisher_token])
+              clear_instance_health(config_name: state[:name])
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.remove_instance',
+                                  instance_id: instance_id)
             end
           end
 
-          # Periodic refresh helpers — diff offerings and drive cadence probes.
+          # Periodic refresh helpers — reconcile configured instances, recover
+          # instances still :initializing, diff offerings, drive cadence probes.
           module RefreshHelpers
             private
 
             def tick_refresh
+              reconcile_configured_instances
               @instance_states.each do |instance_id, state|
                 refresh_instance(instance_id: instance_id, state: state)
               rescue StandardError => e
@@ -532,42 +612,210 @@ module Legion
               end
             end
 
+            # Re-scans configured instances every tick so instances configured
+            # after boot appear without a restart, and removed instances are
+            # released from the registry.
+            def reconcile_configured_instances
+              discovered = configured_instances
+              claim_new_instances(discovered)
+              release_removed_instances(discovered)
+            end
+
             def refresh_instance(instance_id:, state:)
+              status = publisher.snapshot.publication_status(instance_key: state[:instance_key])
+              return log.debug { "[azure_foundry] no publication status for #{instance_id}; skipping refresh" } if
+                status.nil?
+
+              if status.state == :initializing
+                run_initialization_probe(instance_id: instance_id, state: state)
+              else
+                refresh_activated_instance(instance_id: instance_id, state: state)
+              end
+            end
+
+            # D4: an instance whose initial readiness failed stays :initializing.
+            # activate_instance_snapshot is the only transition legal from
+            # :initializing, so a later passing probe re-activates the claim
+            # (fresh probe token, current offerings, next sequence) instead of
+            # calling replace/readiness_succeeded, which would raise
+            # InvalidTransitionError.
+            def run_initialization_probe(instance_id:, state:)
+              coordinator = state[:probe_coordinator]
+              return unless coordinator.begin_probe
+
+              probe_token = publisher.readiness_probe_started(
+                instance_id: instance_id, publisher_token: state[:publisher_token]
+              )
+              readiness = check_health(instance_cfg: state[:instance_cfg])
+              coordinator.finish_probe
+
+              apply_initial_readiness(
+                instance_id: instance_id, state: state, probe_token: probe_token, readiness: readiness
+              )
+            rescue StandardError => e
+              finish_probe_safely(coordinator: coordinator)
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.initialization_probe',
+                                  instance_id: instance_id)
+            end
+
+            def apply_initial_readiness(instance_id:, state:, probe_token:, readiness:)
+              if readiness.ready?
+                activate_after_readiness(instance_id: instance_id, state: state, probe_token: probe_token)
+              else
+                report_initial_failure(
+                  instance_id: instance_id, state: state, probe_token: probe_token, reason: readiness.reason
+                )
+              end
+            end
+
+            def activate_after_readiness(instance_id:, state:, probe_token:)
+              state[:sequence] += 1
+              state[:last_probe_outcome] = :success
+              publisher.activate_instance_snapshot(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                offerings: state[:offerings], sequence: state[:sequence], probe_token: probe_token
+              )
+              write_instance_health(
+                config_name: state[:name], available: true, reason: 'startup readiness succeeded',
+                probe_outcome: :success, source: :startup_readiness,
+                capabilities: instance_capabilities(state[:offerings])
+              )
+            end
+
+            def report_initial_failure(instance_id:, state:, probe_token:, reason:)
+              state[:last_probe_outcome] = :failure
+              publisher.readiness_failed(instance_id: instance_id, probe_token: probe_token, reason: reason)
+              write_instance_health(
+                config_name: state[:name], available: false, reason: reason,
+                probe_outcome: :failure, source: :startup_readiness
+              )
+            end
+
+            def refresh_activated_instance(instance_id:, state:)
               new_offerings = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
 
-              if new_offerings != state[:offerings]
+              if offerings_changed?(previous: state[:offerings], current: new_offerings)
                 state[:sequence] += 1
                 publisher.replace_instance_snapshot(
                   instance_id: instance_id, publisher_token: state[:publisher_token],
                   offerings: new_offerings, sequence: state[:sequence]
                 )
                 state[:offerings] = new_offerings
+                write_instance_health(
+                  config_name: state[:name], available: true, reason: 'offerings refreshed',
+                  probe_outcome: state[:last_probe_outcome], source: :discovery,
+                  capabilities: instance_capabilities(new_offerings)
+                )
               end
 
               run_cadence_probe(instance_id: instance_id, state: state)
             end
           end
 
-          # SSOT v3 periodic discovery actor for Azure AI Foundry provider instances.
-          # Claims instances, discovers deployments from config, probes health
-          # via models/info, and publishes complete OfferingDraft snapshots through
-          # the Inventory::Publisher. Supports coalesced reactive probes after
+          # Display-only health + capabilities projection into
+          # settings[:instances][<config_name>] after each registry commit.
+          # The in-memory AvailabilityFact remains the routing authority; the
+          # settings writes are plain serializable data read by the legion-llm
+          # status API (D14). <config_name> is the settings key the instance was
+          # discovered under — never the derived host:port id.
+          module DiscoveryHealthDisplay
+            # Fleet operation → legacy capability name, matching
+            # ScopedRefresher::LegacyCoordinatorAdapter's LEGACY_CAPABILITIES.
+            LEGACY_CAPABILITY_NAMES = {
+              chat: :completion,
+              stream_chat: :streaming,
+              embed: :embedding,
+              image: :image,
+              transcribe: :audio_transcription,
+              translate: :audio_transcription,
+              speak: :audio_speech,
+              moderate: :moderation
+            }.freeze
+
+            private
+
+            # rubocop:disable Metrics/ParameterLists
+            def write_instance_health(config_name:, available:, reason:, probe_outcome:, source:, capabilities: nil)
+              instance_settings = ensure_instance_settings(config_name)
+              instance_settings[:health] = build_health_display(
+                available: available, reason: reason, probe_outcome: probe_outcome, source: source
+              )
+              instance_settings[:capabilities] = capabilities unless capabilities.nil?
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.write_instance_health',
+                                  instance_name: config_name.to_s)
+            end
+            # rubocop:enable Metrics/ParameterLists
+
+            def ensure_instance_settings(config_name)
+              instances = settings[:instances]
+              instances = settings[:instances] = {} unless instances.is_a?(Hash)
+              instance_settings = instances[config_name]
+              instance_settings = instances[config_name] = {} unless instance_settings.is_a?(Hash)
+              instance_settings
+            end
+
+            def build_health_display(available:, reason:, probe_outcome:, source:)
+              {
+                circuit_state: available ? :closed : :open,
+                denied: false,
+                available: available,
+                adjustment: available ? 0 : -50,
+                reason: reason,
+                observed_at: Time.now.getutc.iso8601,
+                last_probe_outcome: probe_outcome,
+                source: source
+              }
+            end
+
+            def clear_instance_health(config_name:)
+              instances = settings[:instances]
+              return unless instances.is_a?(Hash)
+
+              instance_settings = instances[config_name]
+              return unless instance_settings.is_a?(Hash)
+
+              instance_settings.delete(:health)
+              instance_settings.delete(:capabilities)
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.clear_instance_health',
+                                  instance_name: config_name.to_s)
+            end
+
+            def instance_capabilities(offerings)
+              operations = Set.new
+              offerings.each do |draft|
+                draft.operation_evidence.each_value do |evidence|
+                  operations << evidence.operation if evidence.supported?
+                end
+              end
+              operations.filter_map { |op| LEGACY_CAPABILITY_NAMES[op] }.uniq.sort
+            end
+          end
+
+          # SSOT v3 periodic discovery actor for Azure AI Foundry provider
+          # instances. Claims configured instances (single source:
+          # AzureFoundry.discover_instances), discovers deployments from config,
+          # probes health via models/info, and publishes complete OfferingDraft
+          # snapshots through the Inventory::Publisher. Supports recovery of
+          # instances that failed initial readiness, per-tick reconciliation of
+          # late-removed instances, and coalesced reactive probes after
           # dispatch-triggered instance_unavailable transitions.
           class DiscoveryRefresh < Legion::Extensions::Actors::Every
             include Legion::Extensions::Helpers::Lex
             include Legion::Logging::Helper
             include HealthCheckHelpers
             include OfferingBuilderHelpers
+            include OfferingComparisonHelpers
             include InstanceConfigHelpers
             include InstanceIdentityHelpers
             include ProbeHelpers
             include ShutdownHelpers
             include ActivationHelpers
             include RefreshHelpers
-
-            def self.every_seconds = 3600
+            include DiscoveryHealthDisplay
 
             def runner_class    = self.class
             def runner_function = 'manual'
@@ -577,16 +825,12 @@ module Legion
             def generate_task?  = false
 
             def time
-              settings[:discovery][:interval_seconds]
+              discovery_interval_seconds
             end
 
             def manual
-              if @initialized
-                tick_refresh
-              else
-                initial_discovery
-                @initialized = true
-              end
+              @instance_states ||= Concurrent::Map.new
+              tick_refresh
             rescue StandardError => e
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discovery_refresh')
             end
@@ -596,17 +840,47 @@ module Legion
             rescue StandardError => e
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discovery_refresh.shutdown')
             end
+
+            private
+
+            # D9: the tick interval is the registered discovery.interval_seconds.
+            # A missing or non-positive value falls back to the registered
+            # default — never nil (a nil interval stops the TimerTask after the
+            # first tick).
+            def discovery_interval_seconds
+              discovery = settings[:discovery]
+              interval = discovery.is_a?(Hash) ? discovery[:interval_seconds] : nil
+              interval.is_a?(Integer) && interval.positive? ? interval : registered_discovery_interval_seconds
+            end
+
+            def registered_discovery_interval_seconds
+              Legion::Extensions::Llm::AzureFoundry.default_settings[:discovery][:interval_seconds]
+            end
           end
 
-          # Callable wrapper for an Azure Foundry provider instance. Implements the
-          # `disconnect`, `disconnected?`, and `normalize_dispatch_error(error:)` contracts
-          # required by Inventory::CallableHandle and Routing::ProviderOutcome.
-          # Also implements dispatch operations: chat, stream_chat, embed, count_tokens.
+          # Callable wrapper for an Azure Foundry provider instance. Implements
+          # the fleet dispatch operations by delegating to the per-instance
+          # AzureFoundry::Provider (errors propagate so
+          # normalize_dispatch_error can classify them), plus the `disconnect`
+          # and `normalize_dispatch_error(error:)` contracts required by
+          # Inventory::CallableHandle and Routing::ProviderOutcome.
+          #
+          # The fleet passes `model:` as a raw string (the offering's model id).
+          # chat/stream_chat render paths call `model.id` (the stock
+          # OpenAICompatible#render_payload), so a Model::Info is required
+          # there; embed/count_tokens are string-tolerant (Provider#model_id
+          # accepts the value verbatim), so those pass through — wrapping them
+          # would serialize a Data object into the wire payload/response.
           class AzureFoundryCallable
-            def initialize(instance_cfg:, logger:)
+            def initialize(instance_cfg:, logger:, provider: nil)
               @instance_cfg = instance_cfg
               @logger = logger
+              @provider = provider
               @disconnected = false
+            end
+
+            def provider
+              @provider ||= Legion::Extensions::Llm::AzureFoundry::Provider.new(@instance_cfg)
             end
 
             def disconnected?
@@ -615,82 +889,102 @@ module Legion
 
             def disconnect
               @disconnected = true
+              @provider&.disconnect
               @logger.debug { '[azure_foundry][callable] disconnected' }
             end
 
-            def chat(messages:, model:, **)
-              provider_instance.chat(messages: messages, model: model, **)
+            def chat(messages:, model:, **rest)
+              provider.chat(messages: messages, model: to_model_info(model), **rest)
             end
 
-            def stream_chat(messages:, model:, **)
-              provider_instance.stream(messages: messages, model: model, **)
+            def stream_chat(messages:, model:, **rest, &)
+              provider.stream(messages: messages, model: to_model_info(model), **rest, &)
             end
 
-            def embed(text:, model:, **)
-              provider_instance.embed(text: text, model: model, **)
+            def embed(text:, model:, **rest)
+              provider.embed(text: text, model: model, **rest)
             end
 
-            def count_tokens(messages:, model:, **)
-              provider_instance.count_tokens(messages: messages, model: model, **)
+            def count_tokens(messages:, model:, **rest)
+              provider.count_tokens(messages: messages, model: model, **rest)
             end
 
+            # D17: production dispatch raises Legion::Extensions::Llm::*Error
+            # (ErrorMiddleware), not raw Faraday — the base
+            # Provider#normalize_dispatch_error classifies those. On top, Azure
+            # wire semantics supply two stronger signals: an explicit
+            # EndpointDeactivated body (the ONLY instance_unavailable signal)
+            # and a model-not-ready 503 body (request-local, not instance-down).
             def normalize_dispatch_error(error:)
-              reason = error.message.to_s[0, 512]
+              outcome = base_provider_outcome(error: error)
+              return outcome_with_kind(outcome, :instance_unavailable) if explicit_endpoint_deactivated?(error: error)
+              return outcome_with_kind(outcome, :model_not_ready) if model_not_ready_outcome?(outcome, error: error)
+              return outcome_with_kind(outcome, :model_missing) if model_missing_outcome?(outcome, error: error)
 
-              kind = case error
-                     when Faraday::ConnectionFailed then :connection_failure
-                     when Faraday::TimeoutError     then :timeout
-                     when Faraday::ClientError      then classify_client_error(error: error)
-                     when Faraday::ServerError      then classify_server_error(error: error)
-                     when Legion::Extensions::Llm::OverloadedError then :overloaded
-                     else :provider_error
-                     end
-
-              Legion::Extensions::Llm::Routing::ProviderOutcome.new(
-                kind: kind,
-                reason: reason.empty? ? 'unknown dispatch error' : reason
-              )
+              outcome
             end
 
             private
 
-            def provider_instance
-              @provider_instance ||= Legion::Extensions::Llm::AzureFoundry::Provider.new(@instance_cfg)
+            # The base Provider#normalize_dispatch_error is a pure classifier
+            # (it reads no instance state), so it is bound to an allocated
+            # base instance — the callable classifies dispatch errors without
+            # constructing a provider connection.
+            def base_provider_outcome(error:)
+              @base_classifier ||= Legion::Extensions::Llm::Provider.allocate
+              @base_classifier.normalize_dispatch_error(error: error)
             end
 
-            def classify_client_error(error:)
-              status = error.respond_to?(:response_status) ? error.response_status : nil
-              case status
-              when 401 then :authentication
-              when 403 then :authorization
-              when 404 then :model_missing
-              when 429 then :rate_limited
-              else :invalid_request
-              end
+            def outcome_with_kind(outcome, kind)
+              Legion::Extensions::Llm::Routing::ProviderOutcome.new(kind: kind, reason: outcome.reason)
             end
 
-            def classify_server_error(error:)
-              # An explicit Azure endpoint-deactivation code is the ONLY signal that
-              # justifies instance_unavailable. Every other 5xx stays request-local.
-              return :instance_unavailable if explicit_endpoint_deactivated?(error: error)
-
-              status = error.respond_to?(:response_status) ? error.response_status : nil
-              case status
-              when 503, 529 then :overloaded
-              else :provider_error
-              end
+            def request_local_kind?(kind)
+              %i[overloaded provider_error].include?(kind)
             end
 
+            def model_not_ready_outcome?(outcome, error:)
+              model_not_ready?(error: error) && request_local_kind?(outcome.kind)
+            end
+
+            def model_missing_outcome?(outcome, error:)
+              outcome.kind == :provider_error && error_status(error: error) == 404
+            end
+
+            def to_model_info(model)
+              return model if model.respond_to?(:id)
+
+              Legion::Extensions::Llm::Model::Info.new(id: model.to_s, provider: :azure_foundry)
+            end
+
+            # An explicit Azure endpoint-deactivation code is the ONLY signal
+            # that justifies instance_unavailable. The body is read from the
+            # Llm error's wrapped response (Faraday::Response in production,
+            # Faraday::Env on raw error paths, or a Hash).
             def explicit_endpoint_deactivated?(error:)
               body = extract_error_body(error: error)
-              return false unless body.is_a?(String) && !body.empty?
-
               body.include?('EndpointDeactivated') || body.include?('endpoint_deactivated')
+            end
+
+            def model_not_ready?(error:)
+              body = extract_error_body(error: error).downcase
+              body.include?('model not ready') || body.include?('deployment is warming up')
             end
 
             def extract_error_body(error:)
               response = error.respond_to?(:response) ? error.response : nil
-              response.is_a?(Hash) ? response[:body].to_s : ''
+              return response[:body].to_s if response.is_a?(Hash)
+              return '' if response.nil?
+
+              response.body.to_s
+            end
+
+            def error_status(error:)
+              response = error.respond_to?(:response) ? error.response : nil
+              return response[:status] if response.is_a?(Hash)
+              return nil if response.nil?
+
+              response.status
             end
           end
         end

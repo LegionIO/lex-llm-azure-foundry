@@ -1,17 +1,25 @@
 # frozen_string_literal: true
 
-begin
-  require 'legion/extensions/actors/subscription'
-rescue LoadError => e
-  warn(e.message) if $VERBOSE
+require 'legion/extensions/llm/azure_foundry'
+require 'legion/extensions/llm/fleet/provider_responder'
+require 'legion/extensions/llm/azure_foundry/runners/fleet_worker'
+
+unless defined?(Legion::Extensions::Actors::Subscription)
+  begin
+    require 'legion/extensions/actors/subscription'
+  rescue LoadError => e
+    Legion::Extensions::Llm::AzureFoundry.handle_exception(
+      e,
+      level: :warn,
+      handled: true,
+      operation: 'azure_foundry.fleet_worker.load_subscription'
+    )
+  end
 end
 
 unless defined?(Legion::Extensions::Actors::Subscription)
   raise LoadError, 'LegionIO actor runtime is required for Azure Foundry fleet worker'
 end
-
-require 'legion/extensions/llm/azure_foundry'
-require 'legion/extensions/llm/fleet/provider_responder'
 
 module Legion
   module Extensions
@@ -20,8 +28,12 @@ module Legion
         module Actor
           # Subscription actor for Azure Foundry fleet request consumption.
           class FleetWorker < Legion::Extensions::Actors::Subscription
+            # The Subscription dispatch path (use_runner? == false) calls
+            # runner_class.send(fn, **message) — a String cannot be send-ed, so
+            # the runner must be the resolved module constant, and the runner's
+            # entry point must accept the decoded message as keyword arguments.
             def runner_class
-              'Legion::Extensions::Llm::AzureFoundry::Runners::FleetWorker'
+              Legion::Extensions::Llm::AzureFoundry::Runners::FleetWorker
             end
 
             def runner_function

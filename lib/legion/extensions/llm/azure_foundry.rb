@@ -3,7 +3,7 @@
 require 'legion/extensions/llm'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
-require_relative 'azure_foundry/actors/discovery_refresh'
+require 'legion/extensions/llm/azure_foundry/actors/discovery_refresh'
 
 module Legion
   module Extensions

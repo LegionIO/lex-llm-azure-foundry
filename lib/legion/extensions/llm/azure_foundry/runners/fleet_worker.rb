@@ -3,7 +3,6 @@
 require 'legion/extensions/llm/fleet/provider_responder'
 require 'legion/extensions/llm/inventory/registry'
 require 'legion/extensions/llm/azure_foundry'
-require 'legion/logging'
 
 module Legion
   module Extensions
@@ -11,39 +10,26 @@ module Legion
       module AzureFoundry
         module Runners
           # Runner entrypoint for Azure Foundry fleet request execution.
-          # Delegates to the shared ProviderResponder with exact-offering
-          # registry support for SSOT v3 execution contracts.
+          #
+          # The Subscription dispatch path invokes this as
+          # runner_class.send(fn, **message) where message is the fleet
+          # request envelope merged with transport metadata (routing_key,
+          # message_id, headers, ...). The responder parses the envelope out
+          # of that hash; unknown keys are inert. Errors propagate to the
+          # Subscription's rescue (logged + retry-or-DLQ) — never swallowed.
           module FleetWorker
-            include Legion::Logging::Helper
-            extend Legion::Logging::Helper
-
             module_function
 
-            def handle_fleet_request(payload, delivery: nil, properties: nil)
-              log.debug do
-                "handling Azure Foundry fleet request request_id=#{payload_field(payload, :request_id).inspect} " \
-                  "provider_instance=#{payload_field(payload, :provider_instance).inspect} " \
-                  "operation=#{payload_field(payload, :operation).inspect}"
-              end
+            def handle_fleet_request(**opts)
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
-                payload: payload,
+                payload: opts,
                 provider_family: AzureFoundry::PROVIDER_FAMILY,
                 provider_class: AzureFoundry::Provider,
                 provider_instances: -> { AzureFoundry.discover_instances },
                 registry: Legion::Extensions::Llm::Inventory::Registry,
-                delivery: delivery,
-                properties: properties
+                delivery: opts[:delivery],
+                properties: opts[:properties]
               )
-            end
-
-            def payload_field(payload, key)
-              return unless payload.respond_to?(:[])
-
-              payload[key] || payload[key.to_s]
-            rescue StandardError => e
-              handle_exception(e, level: :warn, handled: true,
-                                  operation: 'azure_foundry.fleet_worker.payload_field', field: key)
-              nil
             end
           end
         end

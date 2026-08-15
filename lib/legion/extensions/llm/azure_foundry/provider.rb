@@ -124,7 +124,7 @@ module Legion
             parse_embedding_response(response, model: model_id(model), text:)
           end
 
-          def count_tokens(messages:, model:, **_provider_options)
+          def count_tokens(messages:, model:, **)
             {
               provider_family: :azure_foundry, model: model_id(model), supported: false,
               reason: 'Azure AI Foundry REST docs do not define a portable token-counting endpoint.',
