@@ -42,10 +42,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
 
   before { registry.reset! }
 
-  def key_for(instance_cfg)
+  # Identity = the operator's config NAME; the derived endpoint id rides the
+  # secondary physical-id field.
+  def key_for(name, instance_cfg: nil)
     Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
       provider_family: :azure_foundry,
-      instance_id: actor.send(:derive_instance_id, instance_cfg: instance_cfg)
+      instance_id: name.to_s,
+      physical_id: instance_cfg && actor.send(:derive_physical_id, instance_cfg: instance_cfg)
     )
   end
 
@@ -82,10 +85,26 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
 
       actor.manual
 
-      key = key_for(eastus_cfg)
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
       expect(registry.snapshot.instance(instance_key: key).availability.state).to eq(:available)
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:complete)
       expect(registry.snapshot.offerings_for(instance_key: key).size).to eq(1)
+    end
+
+    # Identity = the operator's config NAME (the key the router resolves
+    # instances.<name> settings by); the derived endpoint id is the secondary
+    # physical field (dedup/diagnostics only).
+    it 'publishes the config name as instance_id with the derived endpoint id as the physical id' do
+      allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances)
+        .and_return({ eastus: eastus_cfg })
+      allow(actor).to receive(:check_health).and_return(readiness[:ready])
+
+      actor.manual
+
+      record = registry.snapshot.instance(instance_key: key_for(:eastus, instance_cfg: eastus_cfg))
+      expect(record.instance_key.instance_id).to eq('eastus')
+      fingerprint = Legion::Extensions::Llm::CredentialSources.credential_fingerprint('ak-spec-eastus')
+      expect(record.instance_key.physical_id).to eq("eastus.services.ai.azure.com:443/ak:#{fingerprint}")
     end
 
     it 'skips credential-less and disabled instances (never claims a fallback identity)' do
@@ -111,7 +130,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
 
       actor.manual # initial discovery: claim + readiness FAILED
 
-      key = key_for(eastus_cfg)
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
       expect(registry.snapshot.instance(instance_key: key)).to be_nil
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
 
@@ -130,7 +149,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       actor.manual
       actor.manual
 
-      key = key_for(eastus_cfg)
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
       expect(registry.snapshot.instance(instance_key: key)).to be_nil
       expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
     end
@@ -145,13 +164,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       allow(actor).to receive(:check_health).and_return(readiness[:ready])
 
       actor.manual
-      expect(registry.snapshot.instance(instance_key: key_for(eastus_cfg))).not_to be_nil
-      expect(registry.snapshot.instance(instance_key: key_for(westus_cfg))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for(:eastus, instance_cfg: eastus_cfg))).not_to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for(:westus, instance_cfg: westus_cfg))).to be_nil
 
       actor.manual
-      expect(registry.snapshot.instance(instance_key: key_for(eastus_cfg)))
+      expect(registry.snapshot.instance(instance_key: key_for(:eastus, instance_cfg: eastus_cfg)))
         .to be_nil, 'removed instance must be retired'
-      expect(registry.snapshot.instance(instance_key: key_for(westus_cfg)))
+      expect(registry.snapshot.instance(instance_key: key_for(:westus, instance_cfg: westus_cfg)))
         .not_to be_nil, 'late instance must be claimed'
     end
   end
@@ -180,13 +199,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       actor.manual # tick 1 (fresh drafts again — observed_at differs, catalog does not)
       actor.manual # tick 2
 
-      key = key_for(eastus_cfg)
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
       expect(registry.snapshot.publication_status(instance_key: key).published_sequence)
         .to eq(1), 'unchanged offerings must not bump the publication sequence'
     end
 
     it 'replaces the snapshot when the deployment set actually changes' do
-      key = key_for(eastus_cfg)
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
       doubled = eastus_cfg.merge(
         azure_foundry_deployments: [
           { deployment: 'gpt-4o-deployment', model: 'gpt-4o', usage_type: :inference },
@@ -240,7 +259,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       expect(actor.settings.dig(:instances, :eastus, :capabilities)).to include(:completion, :streaming)
     end
 
-    it 'keys the health hash by the config name, not the derived instance_id' do
+    it 'keys the health hash by the config name, not the derived physical id' do
       allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances)
         .and_return({ eastus: eastus_cfg })
       allow(actor).to receive(:check_health).and_return(readiness[:ready])
@@ -248,8 +267,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       actor.manual
 
       expect(actor.settings[:instances].keys).to eq([:eastus])
-      instance_id = actor.send(:derive_instance_id, instance_cfg: eastus_cfg)
-      expect(actor.settings[:instances].keys).not_to include(instance_id)
+      physical_id = actor.send(:derive_physical_id, instance_cfg: eastus_cfg)
+      expect(actor.settings[:instances].keys).not_to include(physical_id)
       expect(actor.settings.dig(:instances, :eastus, :health)[:available]).to be(true)
     end
 
@@ -263,7 +282,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
 
       actor.manual # instance gone → retired
       expect(actor.settings.dig(:instances, :eastus, :health)).to be_nil
-      expect(registry.snapshot.instance(instance_key: key_for(eastus_cfg))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for(:eastus, instance_cfg: eastus_cfg))).to be_nil
     end
 
     it 'clears the health hash and releases the registry on shutdown' do
@@ -277,7 +296,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       actor.shutdown
       expect(actor.settings.dig(:instances, :eastus, :health)).to be_nil
       expect(actor.settings.dig(:instances, :eastus, :capabilities)).to be_nil
-      expect(registry.snapshot.instance(instance_key: key_for(eastus_cfg))).to be_nil
+      expect(registry.snapshot.instance(instance_key: key_for(:eastus, instance_cfg: eastus_cfg))).to be_nil
     end
   end
 

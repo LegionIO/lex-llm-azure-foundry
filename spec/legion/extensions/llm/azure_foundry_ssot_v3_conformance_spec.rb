@@ -87,8 +87,11 @@ end
 # Identity and offering-draft construction delegate to the production actor's
 # real helpers (no harness re-implementation that can drift).
 class AzureFoundrySsotHarness
+  # `name` is the operator's CONFIG NAME — the instance_id the discovery actor
+  # publishes (the key the router resolves instances.<name> settings by).
   INSTANCE_CONFIGS = [
     {
+      name: 'eastus-prod',
       azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
       tier: :cloud,
       azure_foundry_api_key: 'ak-azure-eastus-prod-001',
@@ -100,6 +103,7 @@ class AzureFoundrySsotHarness
       ]
     }.freeze,
     {
+      name: 'westus-prod',
       azure_foundry_endpoint: 'https://westus-prod.openai.azure.com',
       tier: :cloud,
       azure_foundry_api_key: 'ak-azure-westus-prod-002',
@@ -115,8 +119,14 @@ class AzureFoundrySsotHarness
   def provider_family = :azure_foundry
   def instance_configs = INSTANCE_CONFIGS
 
+  # Identity is the operator's config NAME (the router keys settings lookups
+  # by it). The derived endpoint id is the secondary physical field.
   def instance_id(instance_config:)
-    discovery_actor.send(:derive_instance_id, instance_cfg: instance_config)
+    instance_config[:name].to_s
+  end
+
+  def physical_id(instance_config:)
+    discovery_actor.send(:derive_physical_id, instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
@@ -131,7 +141,8 @@ class AzureFoundrySsotHarness
     config = instance_config.merge(tier: tier)
     instance_key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
       provider_family: provider_family,
-      instance_id: instance_id(instance_config: config)
+      instance_id: instance_id(instance_config: config),
+      physical_id: physical_id(instance_config: config)
     )
     discovery_actor.send(:discover_offerings_for_instance, instance_cfg: config, instance_key: instance_key)
   end
@@ -196,33 +207,33 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   it_behaves_like 'an SSOT v3 provider adapter'
 
-  # --- Azure Foundry-specific identity derivation ---
+  # --- Azure Foundry-specific identity ---
 
-  describe 'instance identity derivation' do
-    it 'derives instance_id as host:port/ak:fingerprint with API key' do
+  describe 'instance identity' do
+    it 'publishes the operator config name as the instance_id' do
+      expect(ssot_harness.instance_id(instance_config: ssot_harness.instance_configs[0])).to eq('eastus-prod')
+      expect(ssot_harness.instance_id(instance_config: ssot_harness.instance_configs[1])).to eq('westus-prod')
+    end
+
+    it 'keeps the derived host:port/ak:fingerprint as the secondary physical id' do
       config = ssot_harness.instance_configs[0]
       fingerprint = Legion::Extensions::Llm::CredentialSources.credential_fingerprint(
         config[:azure_foundry_api_key]
       )
       host_port = 'eastus-prod.services.ai.azure.com:443'
-      expect(ssot_harness.instance_id(instance_config: config)).to eq("#{host_port}/ak:#{fingerprint}")
+      expect(ssot_harness.physical_id(instance_config: config)).to eq("#{host_port}/ak:#{fingerprint}")
     end
 
-    it 'derives instance_id as host:port without API key' do
+    it 'derives the physical id as host:port without API key' do
       config = { azure_foundry_endpoint: 'https://public.services.ai.azure.com',
                  azure_foundry_bearer_token: 'bearer-only' }
-      expect(ssot_harness.instance_id(instance_config: config)).to eq('public.services.ai.azure.com:443')
+      expect(ssot_harness.physical_id(instance_config: config)).to eq('public.services.ai.azure.com:443')
     end
 
-    it 'raises instead of falling back to a placeholder endpoint' do
+    it 'raises instead of falling back to a placeholder endpoint for the physical id' do
       expect do
-        ssot_harness.instance_id(instance_config: { azure_foundry_api_key: 'ak' })
+        ssot_harness.physical_id(instance_config: { azure_foundry_api_key: 'ak' })
       end.to raise_error(ArgumentError, /azure_foundry_endpoint/)
-    end
-
-    it 'produces distinct instance IDs for two different endpoints' do
-      ids = ssot_harness.instance_configs.map { |cfg| ssot_harness.instance_id(instance_config: cfg) }
-      expect(ids.uniq.size).to eq(2)
     end
 
     it 'reproduces the same instance_id across multiple calls (stable identity)' do
@@ -232,22 +243,45 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(id_a).to eq(id_b)
     end
 
-    it 'distinguishes two keys against the same endpoint via fingerprint' do
-      config_a = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+    # The physical id is never the identity: two config names pointing at the
+    # SAME endpoint stay distinct instances, and the fingerprint still
+    # distinguishes same-name-different-credential diagnostics.
+    it 'keeps two config names distinct against the same endpoint (no collapse)' do
+      config_a = { name: 'apollo', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
                    azure_foundry_api_key: 'ak-one' }
-      config_b = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
-                   azure_foundry_api_key: 'ak-two' }
-      expect(ssot_harness.instance_id(instance_config: config_a))
-        .not_to eq(ssot_harness.instance_id(instance_config: config_b))
+      config_b = { name: 'apollo-embed', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+                   azure_foundry_api_key: 'ak-one' }
+      expect(ssot_harness.instance_id(instance_config: config_a)).not_to eq(
+        ssot_harness.instance_id(instance_config: config_b)
+      )
+
+      same_a = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :azure_foundry, instance_id: ssot_harness.instance_id(instance_config: config_a),
+        physical_id: ssot_harness.physical_id(instance_config: config_a)
+      )
+      same_b = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :azure_foundry, instance_id: ssot_harness.instance_id(instance_config: config_b),
+        physical_id: ssot_harness.physical_id(instance_config: config_b)
+      )
+      expect(same_a).not_to eq(same_b)
     end
 
-    it 'lowercases the host for normalized comparison' do
+    it 'distinguishes same-name keys against the same endpoint via the physical id fingerprint' do
+      config_a = { name: 'eastus-prod', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+                   azure_foundry_api_key: 'ak-one' }
+      config_b = { name: 'eastus-prod', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+                   azure_foundry_api_key: 'ak-two' }
+      expect(ssot_harness.physical_id(instance_config: config_a))
+        .not_to eq(ssot_harness.physical_id(instance_config: config_b))
+    end
+
+    it 'lowercases the host for normalized physical id comparison' do
       config_upper = { azure_foundry_endpoint: 'https://EastUS-Prod.Services.AI.Azure.COM',
                        azure_foundry_api_key: 'ak-1' }
       config_lower = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
                        azure_foundry_api_key: 'ak-1' }
-      expect(ssot_harness.instance_id(instance_config: config_upper))
-        .to eq(ssot_harness.instance_id(instance_config: config_lower))
+      expect(ssot_harness.physical_id(instance_config: config_upper))
+        .to eq(ssot_harness.physical_id(instance_config: config_lower))
     end
   end
 
@@ -256,6 +290,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   describe 'two deployments on same endpoint' do
     let(:config) do
       {
+        name: 'eastus-prod',
         azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
         azure_foundry_api_key: 'ak-azure-eastus-prod-001',
         azure_foundry_surface: :model_inference,
@@ -342,15 +377,45 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
   end
 
+  # --- Authoritative operation evidence: embedding deployments ---
+
+  describe 'embedding deployment operation evidence' do
+    let(:embed_config) do
+      {
+        name: 'eastus-prod',
+        azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
+        azure_foundry_api_key: 'ak-azure-eastus-prod-001',
+        azure_foundry_surface: :model_inference,
+        azure_foundry_deployments: [
+          { deployment: 'embed-deployment', model: 'text-embedding-3-small', usage_type: :embedding }
+        ]
+      }
+    end
+    let(:embed_offering) { ssot_harness.build_offering_drafts(instance_config: embed_config, tier: :cloud).first }
+
+    it 'publishes chat as :unsupported so a plain chat request cannot misroute to the embedding deployment' do
+      expect(embed_offering.operation_evidence[:chat].status).to eq(:unsupported)
+      expect(embed_offering.operation_evidence[:chat].source).to eq(:provider_implementation)
+    end
+
+    it 'publishes stream_chat as :unsupported' do
+      expect(embed_offering.operation_evidence[:stream_chat].status).to eq(:unsupported)
+    end
+
+    it 'publishes embed as :supported' do
+      expect(embed_offering.operation_evidence[:embed].status).to eq(:supported)
+    end
+
+    it 'publishes the embedding capability as :supported' do
+      expect(embed_offering.capability_evidence[:embedding].status).to eq(:supported)
+    end
+  end
+
   # --- Startup gating ---
 
   describe 'startup gating' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:key) do
-      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :azure_foundry, instance_id: ssot_harness.instance_id(instance_config: config)
-      )
-    end
+    let(:key) { identity_key_for(config) }
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry) }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
     let(:coordinator) do
@@ -400,11 +465,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   describe 'readiness probe lifecycle' do
     let(:config) { ssot_harness.instance_configs[0] }
-    let(:key) do
-      Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-        provider_family: :azure_foundry, instance_id: ssot_harness.instance_id(instance_config: config)
-      )
-    end
+    let(:key) { identity_key_for(config) }
     let(:publisher) { Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry) }
     let(:callable) { ssot_harness.build_callable(instance_config: config) }
     let(:coordinator) do
@@ -922,14 +983,22 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   private
 
+  # Identity = config name; the derived endpoint id rides the secondary
+  # physical-id field.
+  def identity_key_for(config)
+    Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :azure_foundry,
+      instance_id: ssot_harness.instance_id(instance_config: config),
+      physical_id: ssot_harness.physical_id(instance_config: config)
+    )
+  end
+
   # Claims and activates one instance through the public Publisher API using
   # the production callable + the actor's real offering builders.
   def bring_up_instance(config, tier: :cloud)
     publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
     inst_id = ssot_harness.instance_id(instance_config: config)
-    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-      provider_family: :azure_foundry, instance_id: inst_id
-    )
+    key = identity_key_for(config)
     callable = ssot_harness.build_callable(instance_config: config)
     coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
       instance_key: key, enqueue: ->(**) { true }

@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.3] - 2026-08-16
+
+### Changed
+- **Instance identity is the operator's config name** — the discovery actor now
+  publishes `InstanceKey.instance_id` as the config NAME (the key the router
+  resolves `instances.<name>` settings — per-instance tuning, `enable_*`
+  overrides — by), restoring the baseline semantics. The previously-derived
+  `host:port[/ak:fingerprint]` id is kept as the **secondary** `InstanceKey`
+  `physical_id` field (dedup/diagnostics only; it never participates in
+  equality, hashing, or registry-scope identity). Two config names pointing at
+  the same endpoint stay distinct instances; the credential fingerprint still
+  distinguishes same-name configs in diagnostics. `physical_id` is threaded
+  through every `Inventory::Publisher` lifecycle call and onto offering
+  metadata.
+- **Authoritative operation evidence for embedding deployments** — an embedding
+  deployment now publishes `chat: :unsupported` and `stream_chat: :unsupported`
+  (with `embed: :supported`), matching how bedrock authoritatively excludes
+  embedding models, so a plain chat request can no longer misroute to an
+  embedding-only deployment.
+- **Dependency floor** — `lex-llm` raised to `>= 0.7.1` (the
+  `InstanceKey#physical_id` secondary field).
+
 ## [0.3.2] - 2026-08-13
 
 ### Fixed

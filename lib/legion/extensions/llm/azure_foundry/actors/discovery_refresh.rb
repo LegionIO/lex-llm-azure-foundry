@@ -113,10 +113,15 @@ module Legion
 
             def build_operation_evidence(embed_supported:)
               now = Time.now.freeze
+              # An embedding deployment is authoritative evidence that chat is
+              # NOT servable on it (matches bedrock's exclusion): publishing
+              # chat :supported would let a plain chat request misroute to an
+              # embedding-only deployment.
+              chat_status = embed_supported ? :unsupported : :supported
               embed_status = embed_supported ? :supported : :unsupported
               {
-                chat: op_evidence(operation: :chat, status: :supported, observed_at: now),
-                stream_chat: op_evidence(operation: :stream_chat, status: :supported, observed_at: now),
+                chat: op_evidence(operation: :chat, status: chat_status, observed_at: now),
+                stream_chat: op_evidence(operation: :stream_chat, status: chat_status, observed_at: now),
                 embed: op_evidence(operation: :embed, status: embed_status, observed_at: now),
                 image: op_evidence(operation: :image, status: :unsupported, observed_at: now),
                 transcribe: op_evidence(operation: :transcribe, status: :unsupported, observed_at: now),
@@ -301,6 +306,7 @@ module Legion
               meta[:canonical_model_alias] = deployment[:canonical_model_alias].to_s if
                 deployment[:canonical_model_alias]
               meta[:instance_id] = instance_key.instance_id
+              meta[:physical_id] = instance_key.physical_id if instance_key.physical_id
               meta
             end
           end
@@ -398,16 +404,18 @@ module Legion
             end
           end
 
-          # Instance ID derivation from endpoint + credential fingerprint. The
-          # derived instance_id identifies the exact endpoint + credential that
-          # can independently become unavailable — never a provider-family or
-          # localhost fallback.
+          # Physical-ID derivation from endpoint + credential fingerprint. The
+          # derived physical id identifies the exact endpoint + credential that
+          # can independently become unavailable — it is the SECONDARY
+          # InstanceKey field (dedup/diagnostics only), never the identity.
+          # The instance_id is the operator's config NAME (the key the router
+          # resolves instances.<name> settings by).
           module InstanceIdentityHelpers
             private
 
-            def derive_instance_id(instance_cfg:)
+            def derive_physical_id(instance_cfg:)
               endpoint = instance_cfg[:azure_foundry_endpoint]
-              raise ArgumentError, 'azure_foundry_endpoint is required to derive the instance id' unless
+              raise ArgumentError, 'azure_foundry_endpoint is required to derive the physical id' unless
                 credential_string?(endpoint)
 
               host_port = extract_host_port(url: endpoint)
@@ -437,7 +445,8 @@ module Legion
               return unless coordinator.begin_probe
 
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                physical_id: state[:instance_key].physical_id
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe
@@ -458,7 +467,8 @@ module Legion
               return unless coordinator.begin_probe(request: request)
 
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                physical_id: state[:instance_key].physical_id
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe(request: request)
@@ -479,8 +489,10 @@ module Legion
             end
 
             def report_probe_result(instance_id:, probe_token:, readiness:, state:)
+              physical_id = state[:instance_key].physical_id
               if readiness.ready?
-                publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token)
+                publisher.readiness_succeeded(instance_id: instance_id, probe_token: probe_token,
+                                              physical_id: physical_id)
                 state[:last_probe_outcome] = :success
                 write_instance_health(
                   config_name: state[:name], available: true, reason: 'readiness probe succeeded',
@@ -488,7 +500,7 @@ module Legion
                 )
               else
                 publisher.readiness_failed(instance_id: instance_id, probe_token: probe_token,
-                                           reason: readiness.reason)
+                                           reason: readiness.reason, physical_id: physical_id)
                 state[:last_probe_outcome] = :failure
                 write_instance_health(
                   config_name: state[:name], available: false, reason: readiness.reason,
@@ -518,7 +530,8 @@ module Legion
 
               @instance_states.each do |instance_id, state|
                 publisher.remove_instance(
-                  instance_id: instance_id, publisher_token: state[:publisher_token]
+                  instance_id: instance_id, publisher_token: state[:publisher_token],
+                  physical_id: state[:instance_key].physical_id
                 )
                 clear_instance_health(config_name: state[:name])
               rescue StandardError => e
@@ -544,11 +557,16 @@ module Legion
 
             def claim_new_instances(discovered)
               discovered.each do |name, instance_cfg|
-                instance_id = derive_instance_id(instance_cfg: instance_cfg)
+                # Identity is the operator's CONFIG NAME — the key the router
+                # resolves instances.<name> settings (per-instance tuning,
+                # enable_*) by. The derived endpoint id is the secondary
+                # physical field only.
+                instance_id = name.to_s
                 next if @instance_states.key?(instance_id)
 
+                physical_id = derive_physical_id(instance_cfg: instance_cfg)
                 @instance_states[instance_id] = build_instance_context(
-                  name: name, instance_id: instance_id, instance_cfg: instance_cfg
+                  name: name, instance_id: instance_id, physical_id: physical_id, instance_cfg: instance_cfg
                 )
               rescue StandardError => e
                 handle_exception(e, level: :warn, operation: 'azure_foundry.actor.claim_instance',
@@ -557,12 +575,12 @@ module Legion
             end
 
             def release_removed_instances(discovered)
-              discovered_ids = discovered.values.map { |cfg| derive_instance_id(instance_cfg: cfg) }.uniq
-              (@instance_states.keys - discovered_ids).each { |instance_id| remove_instance_state(instance_id) }
+              discovered_names = discovered.keys.map(&:to_s)
+              (@instance_states.keys - discovered_names).each { |instance_id| remove_instance_state(instance_id) }
             end
 
-            def build_instance_context(name:, instance_id:, instance_cfg:)
-              instance_key = build_instance_key(instance_id: instance_id)
+            def build_instance_context(name:, instance_id:, physical_id:, instance_cfg:)
+              instance_key = build_instance_key(instance_id: instance_id, physical_id: physical_id)
               callable = Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable.new(
                 instance_cfg: instance_cfg, logger: log
               )
@@ -570,7 +588,8 @@ module Legion
                 instance_key: instance_key, enqueue: build_probe_enqueue(instance_id: instance_id)
               )
               publisher_token = publisher.claim_instance(instance_id: instance_id, callable: callable,
-                                                         probe_request_handle: probe_coordinator)
+                                                         probe_request_handle: probe_coordinator,
+                                                         physical_id: physical_id)
               {
                 name: name, instance_key: instance_key, instance_cfg: instance_cfg,
                 callable: callable, probe_coordinator: probe_coordinator,
@@ -579,9 +598,9 @@ module Legion
               }
             end
 
-            def build_instance_key(instance_id:)
+            def build_instance_key(instance_id:, physical_id: nil)
               Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-                provider_family: :azure_foundry, instance_id: instance_id
+                provider_family: :azure_foundry, instance_id: instance_id, physical_id: physical_id
               )
             end
 
@@ -589,7 +608,10 @@ module Legion
               state = @instance_states.delete(instance_id)
               return unless state
 
-              publisher.remove_instance(instance_id: instance_id, publisher_token: state[:publisher_token])
+              publisher.remove_instance(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                physical_id: state[:instance_key].physical_id
+              )
               clear_instance_health(config_name: state[:name])
             rescue StandardError => e
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.remove_instance',
@@ -644,7 +666,8 @@ module Legion
               return unless coordinator.begin_probe
 
               probe_token = publisher.readiness_probe_started(
-                instance_id: instance_id, publisher_token: state[:publisher_token]
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                physical_id: state[:instance_key].physical_id
               )
               readiness = check_health(instance_cfg: state[:instance_cfg])
               coordinator.finish_probe
@@ -673,7 +696,8 @@ module Legion
               state[:last_probe_outcome] = :success
               publisher.activate_instance_snapshot(
                 instance_id: instance_id, publisher_token: state[:publisher_token],
-                offerings: state[:offerings], sequence: state[:sequence], probe_token: probe_token
+                offerings: state[:offerings], sequence: state[:sequence], probe_token: probe_token,
+                physical_id: state[:instance_key].physical_id
               )
               write_instance_health(
                 config_name: state[:name], available: true, reason: 'startup readiness succeeded',
@@ -684,7 +708,10 @@ module Legion
 
             def report_initial_failure(instance_id:, state:, probe_token:, reason:)
               state[:last_probe_outcome] = :failure
-              publisher.readiness_failed(instance_id: instance_id, probe_token: probe_token, reason: reason)
+              publisher.readiness_failed(
+                instance_id: instance_id, probe_token: probe_token, reason: reason,
+                physical_id: state[:instance_key].physical_id
+              )
               write_instance_health(
                 config_name: state[:name], available: false, reason: reason,
                 probe_outcome: :failure, source: :startup_readiness
@@ -697,11 +724,7 @@ module Legion
               )
 
               if offerings_changed?(previous: state[:offerings], current: new_offerings)
-                state[:sequence] += 1
-                publisher.replace_instance_snapshot(
-                  instance_id: instance_id, publisher_token: state[:publisher_token],
-                  offerings: new_offerings, sequence: state[:sequence]
-                )
+                replace_instance_offerings(instance_id: instance_id, state: state, offerings: new_offerings)
                 state[:offerings] = new_offerings
                 write_instance_health(
                   config_name: state[:name], available: true, reason: 'offerings refreshed',
@@ -711,6 +734,15 @@ module Legion
               end
 
               run_cadence_probe(instance_id: instance_id, state: state)
+            end
+
+            def replace_instance_offerings(instance_id:, state:, offerings:)
+              state[:sequence] += 1
+              publisher.replace_instance_snapshot(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                offerings: offerings, sequence: state[:sequence],
+                physical_id: state[:instance_key].physical_id
+              )
             end
           end
 
