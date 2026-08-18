@@ -766,12 +766,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   # --- No default model/provider ---
 
   describe 'no default model or provider' do
-    it 'rejects instance_id "default" as reserved' do
-      expect do
-        Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-          provider_family: :azure_foundry, instance_id: 'default'
-        )
-      end.to raise_error(Legion::Extensions::Llm::Inventory::Errors::ValidationError)
+    it 'accepts "default" as an operator instance label' do
+      key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+        provider_family: :azure_foundry, instance_id: 'default'
+      )
+
+      expect(key.provider_family).to eq(:azure_foundry)
+      expect(key.instance_id).to eq('default')
     end
 
     it 'rejects nil instance_id' do

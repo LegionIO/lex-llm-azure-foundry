@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.4] - 2026-08-18
+
+### Fixed
+- **Default instance labels** — Accept `default` as an ordinary operator
+  `InstanceKey` label, matching the shared `lex-llm` identity contract.
+
 ## [0.3.3] - 2026-08-16
 
 ### Changed
