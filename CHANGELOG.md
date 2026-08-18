@@ -22,6 +22,9 @@
 - **Dependency floor** — `lex-llm` raised to `>= 0.7.1` (the
   `InstanceKey#physical_id` secondary field).
 
+### Fixed
+- **Single actor registration** — the provider module no longer extends `::Legion::Extensions::Core` at file level, so the boot-time submodule walk skips it and the gem's own top-level extension load is the sole actor registration — eliminating the double-claim / `FencedPublisherError` twin.
+
 ## [0.3.2] - 2026-08-13
 
 ### Fixed
