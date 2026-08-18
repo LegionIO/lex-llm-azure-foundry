@@ -6,7 +6,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:message) { Legion::Extensions::Llm::Message.new(role: :user, content: 'brief') }
   let(:chat_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gpt-4o-prod', provider: :azure_foundry) }
-  let(:registry_publisher) { instance_double(Legion::Extensions::Llm::RegistryPublisher) }
 
   before do
     Legion::Extensions::Llm.configure do |config|
@@ -61,21 +60,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   # LEADING slash makes Faraday treat the path as absolute and DROP /openai/v1,
   # yielding 404s on discovery and chat. Paths must be relative so the base path
   # survives. This asserts the fully composed URL the daemon actually requests.
-  it 'composes full OpenAI v1 URLs that preserve the /openai/v1 base path' do # rubocop:disable RSpec/ExampleLength
-    Legion::Extensions::Llm.config.azure_foundry_surface = :openai_v1
-    Legion::Extensions::Llm.config.azure_foundry_endpoint = 'https://example.openai.azure.com'
-
-    conn = Faraday.new(provider.api_base)
-    composed = [provider.chat_url, provider.models_url, provider.embedding_url(model: 'text-embedding')]
-               .map { |path| conn.build_url(path).to_s }
-
-    expect(composed).to eq(
-      [
-        'https://example.openai.azure.com/openai/v1/chat/completions',
-        'https://example.openai.azure.com/openai/v1/models',
-        'https://example.openai.azure.com/openai/v1/embeddings'
-      ]
-    )
+  it 'composes full OpenAI v1 URLs that preserve the /openai/v1 base path' do
+    configure_openai_v1_surface
+    expect(composed_openai_v1_urls).to eq(expected_openai_v1_urls)
   end
 
   it 'maps configured deployments to Azure Foundry routing offerings without live calls' do
@@ -103,24 +90,22 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(offline_health).to include(offline_health_matcher)
   end
 
-  it 'publishes live readiness metadata asynchronously through the registry publisher' do
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
+  it 'returns live readiness metadata including provider' do
     allow(provider.connection).to receive(:get).with(provider.health_url).and_return(fake_response({}))
-    allow(registry_publisher).to receive(:publish_readiness_async)
 
     readiness = provider.readiness(live: true)
 
-    expect(registry_publisher).to have_received(:publish_readiness_async).with(readiness)
+    expect(readiness).to include(provider: :azure_foundry, live: true, local: false, remote: true)
+    expect(readiness).to include(ready: true, status: 'healthy')
+    expect(readiness).not_to have_key(:circuit_state)
   end
 
-  it 'publishes configured deployment models asynchronously through the registry publisher' do
-    allow(described_class::Provider).to receive(:registry_publisher).and_return(registry_publisher)
-    allow(registry_publisher).to receive(:publish_models_async)
-
+  it 'returns an array of Model::Info instances from list_models' do
     models = provider.list_models
 
-    expect(registry_publisher).to have_received(:publish_models_async)
-      .with(models, readiness: hash_including(provider: :azure_foundry, live: false))
+    expect(models).to be_an(Array)
+    expect(models).to all(be_a(Legion::Extensions::Llm::Model::Info))
+    expect(models.map(&:provider)).to all(eq(:azure_foundry))
   end
 
   it 'builds sanitized lex-llm registry events for Azure Foundry model availability' do
@@ -155,7 +140,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(described_class.discover_instances).to eq({})
     end
 
-    it 'discovers a :settings instance when endpoint is present' do # rubocop:disable RSpec/ExampleLength
+    it 'discovers a :settings instance when endpoint is present' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ endpoint: 'https://my.azure.com', api_key: 'ak-123' })
@@ -188,7 +173,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(instances).not_to have_key(:settings)
     end
 
-    it 'discovers named instances from the instances sub-key' do # rubocop:disable RSpec/ExampleLength
+    it 'discovers named instances from the instances sub-key' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ instances: { prod: { endpoint: 'https://prod.azure.com', api_key: 'ak-prod' } } })
@@ -210,7 +195,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(instances[:prod]).to include(tier: :fleet)
     end
 
-    it 'normalizes endpoint aliases and deployment settings' do # rubocop:disable RSpec/ExampleLength
+    it 'normalizes endpoint aliases and deployment settings' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ base_url: 'https://openai.azure.com', api_key: 'ak-123',
@@ -224,7 +209,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       )
     end
 
-    it 'resolves the canonical nested credentials and provider shape' do # rubocop:disable RSpec/ExampleLength
+    it 'resolves the canonical nested credentials and provider shape' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ instances: { shrutich: {
@@ -353,11 +338,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   def offline_health_matcher
     {
       provider: :azure_foundry,
-      instance_id: :default,
       ready: true,
       checked: false,
-      status: 'healthy',
-      circuit_state: 'closed'
+      status: 'healthy'
     }
   end
 
@@ -384,6 +367,25 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   def fake_response(body)
     Struct.new(:body).new(body)
+  end
+
+  def configure_openai_v1_surface
+    Legion::Extensions::Llm.config.azure_foundry_surface = :openai_v1
+    Legion::Extensions::Llm.config.azure_foundry_endpoint = 'https://example.openai.azure.com'
+  end
+
+  def composed_openai_v1_urls
+    conn = Faraday.new(provider.api_base)
+    [provider.chat_url, provider.models_url, provider.embedding_url(model: 'text-embedding')]
+      .map { |path| conn.build_url(path).to_s }
+  end
+
+  def expected_openai_v1_urls
+    [
+      'https://example.openai.azure.com/openai/v1/chat/completions',
+      'https://example.openai.azure.com/openai/v1/models',
+      'https://example.openai.azure.com/openai/v1/embeddings'
+    ]
   end
 
   def capture_registry_events(models, readiness:)

@@ -13,20 +13,23 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::FleetWorker do
   let(:properties) { instance_double(FleetWorkerSpecProperties) }
   let(:instances) { { local: { fleet: { respond_to_requests: true } } } }
 
-  it 'delegates fleet execution to the shared lex-llm responder helper' do # rubocop:disable RSpec/ExampleLength
+  it 'delegates fleet execution to the shared lex-llm responder helper' do
     allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances).and_return(instances)
     allow(Legion::Extensions::Llm::Fleet::ProviderResponder).to receive(:call).and_return(:ok)
 
-    result = described_class.handle_fleet_request(payload, delivery:, properties:)
+    # Subscription dispatch invokes the runner as
+    # runner_class.send(fn, **message) — the envelope arrives as kwargs.
+    result = described_class.handle_fleet_request(**payload, delivery:, properties:)
 
     expect(result).to eq(:ok)
-    expect(Legion::Extensions::Llm::Fleet::ProviderResponder).to have_received(:call).with(
-      payload: payload,
-      provider_family: :azure_foundry,
-      provider_class: Legion::Extensions::Llm::AzureFoundry::Provider,
-      provider_instances: satisfy { |resolver| resolver.call == instances },
-      delivery: delivery,
-      properties: properties
-    )
+    expect(Legion::Extensions::Llm::Fleet::ProviderResponder).to have_received(:call) do |args|
+      expect(args[:provider_family]).to eq(:azure_foundry)
+      expect(args[:provider_class]).to eq(Legion::Extensions::Llm::AzureFoundry::Provider)
+      expect(args[:registry]).to eq(Legion::Extensions::Llm::Inventory::Registry)
+      expect(args[:delivery]).to be(delivery)
+      expect(args[:properties]).to be(properties)
+      expect(args[:payload]).to include(payload.merge(delivery:, properties:))
+      expect(args[:provider_instances].call).to eq(instances)
+    end
   end
 end

@@ -16,3 +16,11 @@ Metrics/MethodLength:
   Enabled: false
 RSpec/MultipleExpectations:
   Enabled: false
+RSpec/ExampleLength:
+  Enabled: false
+RSpec/MultipleMemoizedHelpers:
+  Enabled: false
+RSpec/DescribeClass:
+  Exclude:
+    - spec/legion/extensions/llm/azure_foundry/capability_policy_spec.rb
+    - spec/legion/extensions/llm/azure_foundry/context_window_spec.rb
