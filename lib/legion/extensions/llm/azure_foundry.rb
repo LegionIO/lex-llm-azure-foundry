@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
 require 'legion/extensions/llm/azure_foundry/actors/discovery_refresh'
@@ -20,7 +21,7 @@ module Legion
           tier: :frontier,
           transport: :http,
           credentials: { api_key: nil, bearer_token: nil },
-          provider: { api_version: Provider::DEFAULT_API_VERSION, surface: nil, deployments: [] },
+          provider: { api_version: Provider::DEFAULT_API_VERSION, surface: nil },
           usage: { inference: true, embedding: true, image: false },
           limits: { concurrency: 4 },
           fleet: { enabled: false, respond_to_requests: false,
@@ -104,7 +105,6 @@ module Legion
           normalized[:azure_foundry_bearer_token] ||= normalized.delete(:bearer_token)
           normalized[:azure_foundry_api_version] ||= normalized.delete(:api_version)
           normalized[:azure_foundry_surface] ||= normalized.delete(:surface)
-          normalized[:azure_foundry_deployments] ||= normalized.delete(:deployments)
         end
 
         # Nested `credentials: { api_key:, bearer_token: }` is the canonical shape
@@ -119,8 +119,8 @@ module Legion
           normalized[:azure_foundry_bearer_token] ||= creds[:bearer_token]
         end
 
-        # Nested `provider: { api_version:, surface:, deployments: }` is the
-        # canonical shape from default_settings. Flat keys remain accepted.
+        # Nested `provider: { api_version:, surface: }` is the canonical shape
+        # from default_settings. Flat keys remain accepted.
         def self.resolve_nested_provider(normalized)
           prov = normalized.delete(:provider)
           return unless prov.is_a?(Hash)
@@ -128,7 +128,6 @@ module Legion
           prov = prov.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
           normalized[:azure_foundry_api_version] ||= prov[:api_version]
           normalized[:azure_foundry_surface] ||= prov[:surface]
-          normalized[:azure_foundry_deployments] ||= prov[:deployments]
         end
 
         private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
