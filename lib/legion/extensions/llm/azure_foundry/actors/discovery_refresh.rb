@@ -5,6 +5,8 @@ require 'time'
 require 'concurrent'
 require 'faraday'
 
+require 'legion/json'
+require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/inventory/publisher'
 require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
@@ -31,15 +33,17 @@ module Legion
       module AzureFoundry
         module Actor
           # Health-check helpers — non-billable readiness operations only.
-          # Readiness is a non-inference GET of the model catalog
-          # (models/info or /openai/v1/models), never a chat/embed call.
+          # Readiness is a non-inference GET of the model catalog endpoint
+          # (models/info on the model-inference surface, /models on the
+          # OpenAI-compatible surface), never a chat/embed call. The catalog
+          # discovery below hits the SAME endpoint through the same auth.
           module HealthCheckHelpers
             private
 
             def check_health(instance_cfg:)
               endpoint = instance_cfg[:azure_foundry_endpoint]
               conn = build_health_connection(endpoint: endpoint, instance_cfg: instance_cfg)
-              response = conn.get(health_path(instance_cfg: instance_cfg))
+              response = conn.get(catalog_path(instance_cfg: instance_cfg))
               build_readiness_from_response(response: response, endpoint: endpoint)
             rescue Faraday::ConnectionFailed, Faraday::TimeoutError => e
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.check_health')
@@ -49,12 +53,25 @@ module Legion
               readiness_failure(reason: "Azure Foundry health error: #{e.message}", error: e)
             end
 
-            def health_path(instance_cfg:)
+            # The model catalog discovery path, per surface. The provider's
+            # models_url and this path must agree — both derive from the
+            # surface and api-version the same way.
+            def catalog_path(instance_cfg:)
               surface = (instance_cfg[:azure_foundry_surface] || instance_cfg[:surface] || :model_inference).to_sym
               return 'models' if surface == :openai_v1
 
               version = instance_cfg[:azure_foundry_api_version] || instance_cfg[:api_version] || '2024-05-01-preview'
               "models/info?api-version=#{version}"
+            end
+
+            # Catalog responses arrive as raw strings (this connection has no
+            # JSON middleware) — parse through the shared helper.
+            def catalog_body(response)
+              body = response.body
+              return body unless body.is_a?(String)
+              return body if body.strip.empty?
+
+              Legion::JSON.parse(body, symbolize_names: false)
             end
 
             def build_readiness_from_response(response:, endpoint:)
@@ -95,6 +112,10 @@ module Legion
             def apply_auth_headers(faraday:, instance_cfg:)
               api_key = instance_cfg[:azure_foundry_api_key]
               faraday.headers['api-key'] = api_key if api_key.is_a?(String) && !api_key.strip.empty?
+
+              bearer_token = instance_cfg[:azure_foundry_bearer_token]
+              faraday.headers['Authorization'] = "Bearer #{bearer_token}" if
+                bearer_token.is_a?(String) && !bearer_token.strip.empty?
             end
 
             # Accepts the real Faraday shapes (Faraday::Response from conn.get,
@@ -107,7 +128,8 @@ module Legion
           end
 
           # Capability and operation evidence builders — the immutable facts an
-          # OfferingDraft carries about what a deployment can and cannot do.
+          # OfferingDraft carries about what a discovered model can and
+          # cannot do.
           module CapabilityEvidenceHelpers
             private
 
@@ -139,7 +161,7 @@ module Legion
               )
             end
 
-            def build_capability_evidence(deployment:, embed_supported:)
+            def build_capability_evidence(entry:, embed_supported:)
               evidence = base_capability_evidence
               unless embed_supported
                 evidence[:tools] = cap_evidence(
@@ -155,7 +177,8 @@ module Legion
               end
               evidence[:thinking] = cap_evidence(
                 capability: :thinking, status: :unknown,
-                source: deployment.key?(:enable_thinking) ? :instance_override : :default_false
+                source: (entry.key?(:enable_thinking) || entry.key?('enable_thinking')) ? :instance_override
+                                                                                       : :default_false
               )
               evidence
             end
@@ -182,97 +205,91 @@ module Legion
             end
           end
 
-          # Deployment configuration parsing helpers — normalizes the many shapes
-          # operators use when specifying deployments in instance config.
-          module DeploymentParserHelpers
-            private
-
-            def configured_deployments(instance_cfg:)
-              raw = instance_cfg[:azure_foundry_deployments] || instance_cfg[:deployments] || []
-              return deployments_from_hash(raw) if raw.is_a?(Hash)
-
-              Array(raw).map { |entry| normalize_deployment_entry(entry: entry) }
-            end
-
-            def deployments_from_hash(hash)
-              hash.map do |name, metadata|
-                entry = metadata.is_a?(Hash) ? metadata.dup : {}
-                entry[:deployment] ||= name.to_s
-                entry.transform_keys(&:to_sym)
-              end
-            end
-
-            def normalize_deployment_entry(entry:)
-              return entry.transform_keys(&:to_sym) if entry.is_a?(Hash)
-
-              { deployment: entry.to_s }
-            end
-
-            def embedding_deployment?(deployment:, deployment_name:)
-              usage = (deployment[:usage_type] || deployment[:type]).to_s.downcase
-              return true if %w[embed embedding].include?(usage)
-
-              deployment_name.to_s.match?(/embed/i)
-            end
-          end
-
-          # Offering draft builders — assembles complete OfferingDrafts for each
-          # deployment of an instance.
+          # Live model-catalog discovery. Fetches the model catalog from the
+          # instance's discovery endpoint (the same non-billable GET the
+          # readiness probe uses) and assembles a complete OfferingDraft per
+          # catalog entry. Nothing is derived from instance config: whatever
+          # the endpoint reports is the offering set.
           module OfferingBuilderHelpers
             include CapabilityEvidenceHelpers
-            include DeploymentParserHelpers
 
             private
 
-            # D16: programming errors (NameError/NoMethodError/ArgumentError) are
-            # bugs in the builder, not "no offerings" — they must fail loud. Only
-            # runtime errors may degrade to an empty set.
+            # D16: programming errors (NameError/NoMethodError/ArgumentError)
+            # are bugs in the builder, not "no offerings" — they must fail
+            # loud. A catalog fetch failure yields nil (not []): the refresh
+            # loop then keeps the last complete snapshot rather than
+            # replacing it with an empty set.
             def discover_offerings_for_instance(instance_cfg:, instance_key:)
-              build_offering_set(instance_cfg: instance_cfg, instance_key: instance_key)
+              entries = fetch_catalog_entries(instance_cfg:)
+              return nil if entries.nil?
+
+              entries.filter_map do |entry|
+                model_id = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry)
+                next if model_id.to_s.strip.empty?
+
+                build_offering_draft(entry: entry, model_id: model_id,
+                                     instance_cfg: instance_cfg, instance_key: instance_key)
+              end
             rescue StandardError => e
               raise e if programming_error?(e)
 
               handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discover_offerings')
-              []
+              nil
             end
 
             def programming_error?(error)
               error.is_a?(NameError) || error.is_a?(NoMethodError) || error.is_a?(ArgumentError)
             end
 
-            def build_offering_set(instance_cfg:, instance_key:)
-              configured_deployments(instance_cfg: instance_cfg).filter_map do |deployment|
-                deployment_name = deployment[:deployment] || deployment[:model]
-                next if deployment_name.nil? || deployment_name.to_s.strip.empty?
+            def fetch_catalog_entries(instance_cfg:)
+              conn = build_health_connection(
+                endpoint: instance_cfg[:azure_foundry_endpoint], instance_cfg: instance_cfg
+              )
+              response = conn.get(catalog_path(instance_cfg: instance_cfg))
+              return nil unless response.status == 200
 
-                build_offering_draft(deployment: deployment, deployment_name: deployment_name.to_s,
-                                     instance_cfg: instance_cfg, instance_key: instance_key)
-              end
+              Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_entries(
+                catalog_body(response)
+              )
+            rescue StandardError => e
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.fetch_catalog')
+              nil
             end
 
-            def build_offering_draft(deployment:, deployment_name:, instance_cfg:, instance_key:)
+            def build_offering_draft(entry:, model_id:, instance_cfg:, instance_key:)
               tier = (instance_cfg[:tier] || :cloud).to_sym
-              model_id = (deployment[:model] || deployment_name).to_s
-              embed = embedding_deployment?(deployment: deployment, deployment_name: deployment_name)
+              embed = embedding_model?(model_id, entry)
+              base_name = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.base_model_name_for(entry)
 
               Legion::Extensions::Llm::Inventory::OfferingDraft.new(
-                provider_native_key: deployment_name, model: model_id, tier: tier,
+                provider_native_key: model_id, model: model_id, tier: tier,
                 operation_evidence: build_operation_evidence(embed_supported: embed),
-                capability_evidence: build_capability_evidence(deployment: deployment, embed_supported: embed),
-                context_evidence: build_context_evidence(deployment: deployment, instance_cfg: instance_cfg),
-                max_output_evidence: build_max_output_evidence(deployment: deployment, instance_cfg: instance_cfg),
+                capability_evidence: build_capability_evidence(entry: entry, embed_supported: embed),
+                context_evidence: build_context_evidence(entry: entry, instance_cfg: instance_cfg),
+                max_output_evidence: build_max_output_evidence(entry: entry, instance_cfg: instance_cfg),
                 embedding_dimensions_evidence: absent_value_evidence,
                 model_revision_evidence: absent_value_evidence,
                 tokenizer_evidence: absent_value_evidence,
-                quota_domains: build_quota_domains(deployment_name: deployment_name),
-                metadata: build_offering_metadata(deployment: deployment, deployment_name: deployment_name,
+                quota_domains: build_quota_domains(model_id: model_id),
+                metadata: build_offering_metadata(entry: entry, model_id: model_id, base_name: base_name,
                                                   instance_key: instance_key).freeze,
-                publication_source: :provider_static_catalog
+                publication_source: :provider_catalog
               )
             end
 
-            def build_context_evidence(deployment:, instance_cfg:)
-              ctx = deployment[:context_window] || deployment[:max_input_tokens] ||
+            # Embedding detection: an explicit catalog usage field when
+            # present, otherwise the model name. A name match is a naming
+            # hint, not authoritative proof.
+            def embedding_model?(model_id, entry)
+              usage = (entry['usage_type'] || entry[:usage_type] || entry['type'] || entry[:type]).to_s.downcase
+              return true if %w[embed embedding].include?(usage)
+
+              model_id.to_s.match?(/embed/i)
+            end
+
+            def build_context_evidence(entry:, instance_cfg:)
+              ctx = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.context_window_for(entry) ||
                     instance_cfg[:context_window] || instance_cfg[:max_input_tokens]
               return absent_value_evidence unless ctx.is_a?(Integer) && ctx.positive?
 
@@ -281,8 +298,9 @@ module Legion
               )
             end
 
-            def build_max_output_evidence(deployment:, instance_cfg:)
-              max_out = deployment[:max_output_tokens] || instance_cfg[:max_output_tokens]
+            def build_max_output_evidence(entry:, instance_cfg:)
+              max_out = entry['max_output_tokens'] || entry[:max_output_tokens] ||
+                        instance_cfg[:max_output_tokens]
               return absent_value_evidence unless max_out.is_a?(Integer) && max_out.positive?
 
               Legion::Extensions::Llm::Inventory::ValueEvidence.new(
@@ -290,24 +308,24 @@ module Legion
               )
             end
 
-            def build_quota_domains(deployment_name:)
-              return {} if deployment_name.nil? || deployment_name.to_s.strip.empty?
+            def build_quota_domains(model_id:)
+              return {} if model_id.to_s.strip.empty?
 
               {
-                chat: "azure:deployment:#{deployment_name}",
-                stream_chat: "azure:deployment:#{deployment_name}",
-                embed: "azure:deployment:#{deployment_name}"
+                chat: "azure:deployment:#{model_id}",
+                stream_chat: "azure:deployment:#{model_id}",
+                embed: "azure:deployment:#{model_id}"
               }
             end
 
-            def build_offering_metadata(deployment:, deployment_name:, instance_key:)
-              meta = { raw_deployment: deployment_name }
-              meta[:model_family] = deployment[:model_family].to_sym if deployment[:model_family]
-              meta[:canonical_model_alias] = deployment[:canonical_model_alias].to_s if
-                deployment[:canonical_model_alias]
+            def build_offering_metadata(entry:, model_id:, base_name:, instance_key:)
+              meta = { raw_catalog: entry }
+              meta[:canonical_model_alias] = base_name if base_name
+              meta[:model_family] =
+                Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_family_for(base_name || model_id)
               meta[:instance_id] = instance_key.instance_id
               meta[:physical_id] = instance_key.physical_id if instance_key.physical_id
-              meta
+              meta.compact
             end
           end
 
@@ -829,9 +847,12 @@ module Legion
 
           # SSOT v3 periodic discovery actor for Azure AI Foundry provider
           # instances. Claims configured instances (single source:
-          # AzureFoundry.discover_instances), discovers deployments from config,
-          # probes health via models/info, and publishes complete OfferingDraft
-          # snapshots through the Inventory::Publisher. Supports recovery of
+          # AzureFoundry.discover_instances), discovers the live model catalog
+          # from the instance's discovery endpoint (models/info on the
+          # model-inference surface, /models on the OpenAI-compatible surface),
+          # probes health through the same endpoint, and publishes complete
+          # OfferingDraft snapshots through the Inventory::Publisher. Supports
+          # recovery of
           # instances that failed initial readiness, per-tick reconciliation of
           # late-removed instances, and coalesced reactive probes after
           # dispatch-triggered instance_unavailable transitions.
