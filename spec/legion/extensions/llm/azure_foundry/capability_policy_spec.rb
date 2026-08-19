@@ -10,20 +10,25 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider capability polic
       config.azure_foundry_endpoint = 'https://example.services.ai.azure.com'
       config.azure_foundry_api_key = 'test-key'
       config.azure_foundry_surface = :model_inference
-      config.azure_foundry_deployments = deployments
     end
     allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
       .with(:extensions, :llm, :azure_foundry).and_return(provider_settings)
   end
 
+  def stub_catalog(entries)
+    allow(provider.connection).to receive(:get).with(provider.models_url).and_return(
+      Struct.new(:body).new({ 'data' => entries })
+    )
+  end
+
   describe 'CapabilityPolicy integration' do
-    context 'when deployment has no feature metadata' do
-      let(:deployments) { [{ deployment: 'unknown-model-v1', usage_type: :inference }] }
+    context 'when the catalog entry has no feature metadata' do
       let(:provider_settings) { { endpoint: 'https://example.services.ai.azure.com' } }
 
+      before { stub_catalog([{ 'id' => 'unknown-model-v1' }]) }
+
       it 'defaults all optional capabilities to false except streaming and tools from real metadata' do
-        offerings = provider.discover_offerings(live: false)
-        offering = offerings.find { |o| o.model == 'unknown-model-v1' }
+        offering = provider.discover_offerings(live: true).find { |o| o.model == 'unknown-model-v1' }
 
         expect(offering.capability_sources[:vision]).to include(value: false)
         expect(offering.capability_sources[:thinking]).to include(value: false, source: :default_false)
@@ -32,7 +37,8 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider capability polic
     end
 
     context 'with provider-root override' do
-      let(:deployments) { [{ deployment: 'gpt-4o-prod', model_family: :openai, usage_type: :inference }] }
+      before { stub_catalog([{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o' }]) }
+
       let(:provider_settings) do
         { endpoint: 'https://example.services.ai.azure.com', streaming_flag: true, tools_flag: false }
       end
@@ -53,12 +59,13 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider capability polic
     end
 
     context 'with instance override' do
-      let(:deployments) { [{ deployment: 'gpt-4o-prod', model_family: :openai, usage_type: :inference }] }
+      before { stub_catalog([{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o' }]) }
+
       let(:provider_settings) { { endpoint: 'https://example.services.ai.azure.com' } }
 
       it 'applies tools as :instance_override and embedding_flag false as :instance_override' do
         configured = build_configured_provider
-        offering = configured.discover_offerings(live: false).find { |o| o.model == 'gpt-4o-prod' }
+        offering = configured.discover_offerings(live: true).find { |o| o.model == 'gpt-4o-prod' }
 
         expect(offering.capability_sources[:tools]).to include(value: true, source: :instance_override)
         expect(offering.capability_sources[:embedding]).to include(value: false, source: :instance_override)
@@ -66,7 +73,8 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider capability polic
     end
 
     context 'with model override' do
-      let(:deployments) { [{ deployment: 'gpt-4o-prod', model_family: :openai, usage_type: :inference }] }
+      before { stub_catalog([{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o' }]) }
+
       let(:provider_settings) do
         { endpoint: 'https://example.services.ai.azure.com',
           models: { 'gpt-4o-prod': { tools_flag: false, vision_flag: true } } }
@@ -89,17 +97,20 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider capability polic
   end
 
   def build_configured_provider
-    Legion::Extensions::Llm::AzureFoundry::Provider.new(
+    p = Legion::Extensions::Llm::AzureFoundry::Provider.new(
       azure_foundry_endpoint: 'https://example.services.ai.azure.com',
       azure_foundry_api_key: 'test-key',
       azure_foundry_surface: :model_inference,
-      azure_foundry_deployments: deployments,
       tools_flag: true,
       embedding_flag: false
     )
+    allow(p.connection).to receive(:get).with(p.models_url).and_return(
+      Struct.new(:body).new({ 'data' => [{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o' }] })
+    )
+    p
   end
 
   def first_offering
-    provider.discover_offerings(live: false).find { |o| o.model == 'gpt-4o-prod' }
+    provider.discover_offerings(live: true).find { |o| o.model == 'gpt-4o-prod' }
   end
 end

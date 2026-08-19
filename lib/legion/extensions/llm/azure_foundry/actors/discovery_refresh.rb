@@ -177,8 +177,11 @@ module Legion
               end
               evidence[:thinking] = cap_evidence(
                 capability: :thinking, status: :unknown,
-                source: (entry.key?(:enable_thinking) || entry.key?('enable_thinking')) ? :instance_override
-                                                                                       : :default_false
+                source: if entry.key?(:enable_thinking) || entry.key?('enable_thinking')
+                          :instance_override
+                        else
+                          :default_false
+                        end
               )
               evidence
             end
@@ -224,6 +227,18 @@ module Legion
               entries = fetch_catalog_entries(instance_cfg:)
               return nil if entries.nil?
 
+              build_offering_drafts(entries: entries, instance_cfg: instance_cfg, instance_key: instance_key)
+            rescue StandardError => e
+              raise e if programming_error?(e)
+
+              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discover_offerings')
+              nil
+            end
+
+            # Builds one OfferingDraft per catalog entry. The pure seam the
+            # SSOT harness drives with fixed entries (mirroring bedrock's
+            # harness-supplied model summary) — no network involved.
+            def build_offering_drafts(entries:, instance_cfg:, instance_key:)
               entries.filter_map do |entry|
                 model_id = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry)
                 next if model_id.to_s.strip.empty?
@@ -231,11 +246,6 @@ module Legion
                 build_offering_draft(entry: entry, model_id: model_id,
                                      instance_cfg: instance_cfg, instance_key: instance_key)
               end
-            rescue StandardError => e
-              raise e if programming_error?(e)
-
-              handle_exception(e, level: :warn, operation: 'azure_foundry.actor.discover_offerings')
-              nil
             end
 
             def programming_error?(error)
@@ -564,6 +574,33 @@ module Legion
           module ActivationHelpers
             private
 
+            def activate_after_readiness(instance_id:, state:, probe_token:)
+              state[:sequence] += 1
+              state[:last_probe_outcome] = :success
+              publisher.activate_instance_snapshot(
+                instance_id: instance_id, publisher_token: state[:publisher_token],
+                offerings: state[:offerings], sequence: state[:sequence], probe_token: probe_token,
+                physical_id: state[:instance_key].physical_id
+              )
+              write_instance_health(
+                config_name: state[:name], available: true, reason: 'startup readiness succeeded',
+                probe_outcome: :success, source: :startup_readiness,
+                capabilities: instance_capabilities(state[:offerings])
+              )
+            end
+
+            def report_initial_failure(instance_id:, state:, probe_token:, reason:)
+              state[:last_probe_outcome] = :failure
+              publisher.readiness_failed(
+                instance_id: instance_id, probe_token: probe_token, reason: reason,
+                physical_id: state[:instance_key].physical_id
+              )
+              write_instance_health(
+                config_name: state[:name], available: false, reason: reason,
+                probe_outcome: :failure, source: :startup_readiness
+              )
+            end
+
             def publisher
               @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
                 provider_family: :azure_foundry,
@@ -700,46 +737,40 @@ module Legion
             end
 
             def apply_initial_readiness(instance_id:, state:, probe_token:, readiness:)
-              if readiness.ready?
-                activate_after_readiness(instance_id: instance_id, state: state, probe_token: probe_token)
-              else
+              unless readiness.ready?
                 report_initial_failure(
                   instance_id: instance_id, state: state, probe_token: probe_token, reason: readiness.reason
                 )
+                return
               end
-            end
 
-            def activate_after_readiness(instance_id:, state:, probe_token:)
-              state[:sequence] += 1
-              state[:last_probe_outcome] = :success
-              publisher.activate_instance_snapshot(
-                instance_id: instance_id, publisher_token: state[:publisher_token],
-                offerings: state[:offerings], sequence: state[:sequence], probe_token: probe_token,
-                physical_id: state[:instance_key].physical_id
-              )
-              write_instance_health(
-                config_name: state[:name], available: true, reason: 'startup readiness succeeded',
-                probe_outcome: :success, source: :startup_readiness,
-                capabilities: instance_capabilities(state[:offerings])
-              )
-            end
+              # A readiness pass proves the endpoint answers; the catalog
+              # fetch can still fail (e.g. an unparseable body). Do not
+              # activate with a nil catalog — retry on the next tick.
+              offerings = state[:offerings] ||
+                          discover_offerings_for_instance(
+                            instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
+                          )
+              if offerings.nil?
+                report_initial_failure(
+                  instance_id: instance_id, state: state, probe_token: probe_token,
+                  reason: 'model catalog fetch failed'
+                )
+                return
+              end
 
-            def report_initial_failure(instance_id:, state:, probe_token:, reason:)
-              state[:last_probe_outcome] = :failure
-              publisher.readiness_failed(
-                instance_id: instance_id, probe_token: probe_token, reason: reason,
-                physical_id: state[:instance_key].physical_id
-              )
-              write_instance_health(
-                config_name: state[:name], available: false, reason: reason,
-                probe_outcome: :failure, source: :startup_readiness
-              )
+              state[:offerings] = offerings
+              activate_after_readiness(instance_id: instance_id, state: state, probe_token: probe_token)
             end
 
             def refresh_activated_instance(instance_id:, state:)
               new_offerings = discover_offerings_for_instance(
                 instance_cfg: state[:instance_cfg], instance_key: state[:instance_key]
               )
+
+              # A failed catalog fetch (nil) keeps the last complete snapshot
+              # — an incomplete refresh must never delete a known catalog.
+              return run_cadence_probe(instance_id: instance_id, state: state) if new_offerings.nil?
 
               if offerings_changed?(previous: state[:offerings], current: new_offerings)
                 replace_instance_offerings(instance_id: instance_id, state: state, offerings: new_offerings)

@@ -96,11 +96,7 @@ class AzureFoundrySsotHarness
       tier: :cloud,
       azure_foundry_api_key: 'ak-azure-eastus-prod-001',
       azure_foundry_surface: :model_inference,
-      azure_foundry_api_version: '2024-05-01-preview',
-      azure_foundry_deployments: [
-        { deployment: 'gpt-4o-deployment', model: 'gpt-4o', model_family: :openai,
-          canonical_model_alias: 'gpt-4o', usage_type: :inference, context_window: 128_000 }
-      ]
+      azure_foundry_api_version: '2024-05-01-preview'
     }.freeze,
     {
       name: 'westus-prod',
@@ -108,13 +104,29 @@ class AzureFoundrySsotHarness
       tier: :cloud,
       azure_foundry_api_key: 'ak-azure-westus-prod-002',
       azure_foundry_surface: :openai_v1,
-      azure_foundry_api_version: '2024-05-01-preview',
-      azure_foundry_deployments: [
-        { deployment: 'gpt-4o-mini-deployment', model: 'gpt-4o-mini', model_family: :openai,
-          canonical_model_alias: 'gpt-4o-mini', usage_type: :inference, context_window: 128_000 }
-      ]
+      azure_foundry_api_version: '2024-05-01-preview'
     }.freeze
   ].freeze
+
+  # The live model catalog each instance's discovery endpoint reports. In
+  # production this comes from GET models/info (model_inference) or GET models
+  # (openai_v1); the harness supplies the fixed entries the production draft
+  # builder consumes — the same seam bedrock's harness uses for model summaries.
+  CATALOGS = {
+    'eastus-prod' => [
+      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000 }
+    ].freeze,
+    'westus-prod' => [
+      { 'id' => 'gpt-4o-mini-deployment', 'model_name' => 'gpt-4o-mini', 'context_window' => 128_000 }
+    ].freeze,
+    'eastus-multi' => [
+      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000 },
+      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small' }
+    ].freeze,
+    'eastus-embed' => [
+      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small' }
+    ].freeze
+  }.freeze
 
   def provider_family = :azure_foundry
   def instance_configs = INSTANCE_CONFIGS
@@ -144,7 +156,16 @@ class AzureFoundrySsotHarness
       instance_id: instance_id(instance_config: config),
       physical_id: physical_id(instance_config: config)
     )
-    discovery_actor.send(:discover_offerings_for_instance, instance_cfg: config, instance_key: instance_key)
+    # Production draft path with harness-supplied catalog entries: the actor's
+    # own build_offering_drafts (operation evidence, capability evidence,
+    # context window, quota domains, metadata) — no network involved.
+    discovery_actor.send(:build_offering_drafts,
+                         entries: catalog_entries(instance_config), instance_cfg: config,
+                         instance_key: instance_key)
+  end
+
+  def catalog_entries(instance_config)
+    CATALOGS.fetch(instance_config[:name].to_s)
   end
 
   def safe_readiness(instance_config:, **)
@@ -285,32 +306,28 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
   end
 
-  # --- Two deployments on same endpoint ---
+  # --- Multiple catalog models on same endpoint ---
 
-  describe 'two deployments on same endpoint' do
+  describe 'two catalog models on same endpoint' do
     let(:config) do
       {
-        name: 'eastus-prod',
+        name: 'eastus-multi',
         azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
         azure_foundry_api_key: 'ak-azure-eastus-prod-001',
-        azure_foundry_surface: :model_inference,
-        azure_foundry_deployments: [
-          { deployment: 'gpt-4o-deployment', model: 'gpt-4o', usage_type: :inference },
-          { deployment: 'embed-deployment', model: 'text-embedding-3-small', usage_type: :embedding }
-        ]
+        azure_foundry_surface: :model_inference
       }
     end
 
-    it 'creates separate offerings for each deployment on the same instance' do
+    it 'creates separate offerings for each catalog model on the same instance' do
       ctx = bring_up_instance(config)
       snapshot = registry.snapshot
       offerings = snapshot.offerings_for(instance_key: ctx[:key])
       expect(offerings.size).to eq(2)
       models = offerings.map(&:model).sort
-      expect(models).to eq(%w[gpt-4o text-embedding-3-small])
+      expect(models).to eq(%w[embed-deployment gpt-4o-deployment])
     end
 
-    it 'creates separate lanes per deployment per supported operation' do
+    it 'creates separate lanes per catalog model per supported operation' do
       ctx = bring_up_instance(config)
       snapshot = registry.snapshot
       lanes = snapshot.lanes_for(instance_key: ctx[:key])
@@ -379,16 +396,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   # --- Authoritative operation evidence: embedding deployments ---
 
-  describe 'embedding deployment operation evidence' do
+  describe 'embedding catalog model operation evidence' do
     let(:embed_config) do
       {
-        name: 'eastus-prod',
+        name: 'eastus-embed',
         azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
         azure_foundry_api_key: 'ak-azure-eastus-prod-001',
-        azure_foundry_surface: :model_inference,
-        azure_foundry_deployments: [
-          { deployment: 'embed-deployment', model: 'text-embedding-3-small', usage_type: :embedding }
-        ]
+        azure_foundry_surface: :model_inference
       }
     end
     let(:embed_offering) { ssot_harness.build_offering_drafts(instance_config: embed_config, tier: :cloud).first }
@@ -934,9 +948,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       end
     end
 
-    it 'sets publication_source to :provider_static_catalog' do
+    it 'sets publication_source to :provider_catalog (live discovery)' do
       drafts.each do |draft|
-        expect(draft.publication_source).to eq(:provider_static_catalog)
+        expect(draft.publication_source).to eq(:provider_catalog)
       end
     end
 
@@ -952,10 +966,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       end
     end
 
-    it 'keeps provider_native_key (deployment) distinct from model' do
+    it 'uses the catalog model id as both provider_native_key and model' do
       drafts.each do |draft|
         expect(draft.provider_native_key).to eq('gpt-4o-deployment')
-        expect(draft.model).to eq('gpt-4o')
+        expect(draft.model).to eq('gpt-4o-deployment')
+        expect(draft.metadata[:canonical_model_alias]).to eq('gpt-4o')
       end
     end
   end

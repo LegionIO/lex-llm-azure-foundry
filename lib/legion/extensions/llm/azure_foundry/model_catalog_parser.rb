@@ -34,22 +34,23 @@ module Legion
           # Extracts the raw model-entry list from a parsed catalog response
           # body. Raises on an unrecognized envelope.
           def model_entries(body)
-            Array(extract_entries(body)).filter_map { |entry| entry if entry.is_a?(Hash) }
+            Array(extract_entries(body)).grep(Hash)
           end
 
           def extract_entries(body)
             return body if body.is_a?(Array)
+            raise ArgumentError, "Azure Foundry catalog response must be a Hash or Array, got #{body.class}" unless
+              body.is_a?(Hash)
 
-            unless body.is_a?(Hash)
-              raise ArgumentError, "Azure Foundry catalog response must be a Hash or Array, got #{body.class}"
-            end
-
-            key = CATALOG_LIST_KEYS.find { |k| body.key?(k) || body.key?(k.to_s) }
-            return (body[key] || body[key.to_s]) if key
-
+            key = list_key_for(body)
+            return body[key] || body[key.to_s] if key
             return [body] if looks_like_model?(body)
 
             raise ArgumentError, "unrecognized Azure Foundry catalog envelope: #{body.keys.first(5).inspect}"
+          end
+
+          def list_key_for(body)
+            CATALOG_LIST_KEYS.find { |k| body.key?(k) || body.key?(k.to_s) }
           end
 
           def looks_like_model?(body) = MODEL_ID_KEYS.any? { |k| body.key?(k) || body.key?(k.to_s) }
@@ -58,17 +59,11 @@ module Legion
           # the Foundry surface this is the deployment name (what the API
           # accepts as the model field); on the OpenAI surface it is the
           # model id.
-          def model_id_for(entry)
-            value = lookup(entry, MODEL_ID_KEYS)
-            value.nil? ? nil : value.to_s
-          end
+          def model_id_for(entry) = lookup(entry, MODEL_ID_KEYS)&.to_s
 
           # The base/underlying model name, when the catalog reports one
           # distinct from the routable id (e.g. Foundry model_name).
-          def base_model_name_for(entry)
-            value = lookup(entry, BASE_NAME_KEYS)
-            value.nil? ? nil : value.to_s
-          end
+          def base_model_name_for(entry) = lookup(entry, BASE_NAME_KEYS)&.to_s
 
           def context_window_for(entry)
             CONTEXT_KEYS.each do |key|

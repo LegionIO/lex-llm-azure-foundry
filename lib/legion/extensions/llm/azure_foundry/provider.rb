@@ -118,6 +118,8 @@ module Legion
           def model_info_from_catalog_entry(entry, model_id)
             base_name = ModelCatalogParser.base_model_name_for(entry)
             family = ModelCatalogParser.model_family_for(base_name || model_id)
+            max_output = entry['max_output_tokens'] || entry[:max_output_tokens]
+            max_output = max_output.to_i if max_output
             Legion::Extensions::Llm::Model::Info.new(
               id: model_id,
               name: base_name || model_id,
@@ -125,7 +127,8 @@ module Legion
               family: family,
               capabilities: Capabilities.critical_capabilities_for(model_id),
               context_length: ModelCatalogParser.context_window_for(entry),
-              metadata: { raw: entry }
+              # Model::Info#max_output_tokens reads metadata[:max_output_tokens].
+              metadata: { raw: entry, max_output_tokens: max_output }.compact
             )
           end
         end
@@ -138,18 +141,8 @@ module Legion
           private
 
           def offering_from_model(model, health: {})
-            real = Array(model.capabilities).to_h do |cap|
-              [cap.to_s.downcase.tr('-', '_').tr(' ', '_').to_sym, true]
-            end
-            policy = Legion::Extensions::Llm::CapabilityPolicy.resolve(
-              real: real,
-              provider_catalog: {},
-              probe: {},
-              provider_envelope: { streaming: true },
-              provider_config: provider_capability_config,
-              instance_config: instance_capability_config,
-              model_config: model_capability_config(model.id)
-            )
+            policy = resolve_catalog_capability_policy(model)
+            family = model.family&.to_sym
 
             Legion::Extensions::Llm::Routing::ModelOffering.new(
               provider_family: :azure_foundry,
@@ -158,7 +151,7 @@ module Legion
               tier: offering_tier,
               model: model.id,
               canonical_model_alias: model.name,
-              model_family: model.family,
+              model_family: family,
               usage_type: model.embedding? ? :embedding : :inference,
               capabilities: policy[:capabilities],
               capability_sources: policy[:sources],
@@ -167,7 +160,22 @@ module Legion
                 max_output_tokens: model.max_output_tokens
               }.compact,
               health: health,
-              metadata: { model_family: model.family }.compact
+              metadata: { model_family: family }.compact
+            )
+          end
+
+          def resolve_catalog_capability_policy(model)
+            real = Array(model.capabilities).to_h do |cap|
+              [cap.to_s.downcase.tr('-', '_').tr(' ', '_').to_sym, true]
+            end
+            Legion::Extensions::Llm::CapabilityPolicy.resolve(
+              real: real,
+              provider_catalog: {},
+              probe: {},
+              provider_envelope: { streaming: true },
+              provider_config: provider_capability_config,
+              instance_config: instance_capability_config,
+              model_config: model_capability_config(model.id)
             )
           end
         end

@@ -11,10 +11,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
       tier: :cloud,
       azure_foundry_api_key: 'ak-spec-eastus',
-      azure_foundry_surface: :model_inference,
-      azure_foundry_deployments: [
-        { deployment: 'gpt-4o-deployment', model: 'gpt-4o', usage_type: :inference }
-      ]
+      azure_foundry_surface: :model_inference
     }
   end
   let(:westus_cfg) do
@@ -22,11 +19,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       azure_foundry_endpoint: 'https://westus.services.ai.azure.com',
       tier: :cloud,
       azure_foundry_api_key: 'ak-spec-westus',
-      azure_foundry_surface: :model_inference,
-      azure_foundry_deployments: [
-        { deployment: 'gpt-4o-deployment', model: 'gpt-4o', usage_type: :inference }
-      ]
+      azure_foundry_surface: :model_inference
     }
+  end
+  let(:catalog) do
+    [{ 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000 }]
   end
   let(:readiness) do
     {
@@ -40,7 +37,10 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
     }
   end
 
-  before { registry.reset! }
+  before do
+    registry.reset!
+    allow(actor).to receive(:fetch_catalog_entries).and_return(catalog)
+  end
 
   # Identity = the operator's config NAME; the derived endpoint id rides the
   # secondary physical-id field.
@@ -118,6 +118,20 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
 
       expect(registry.snapshot.each_instance.to_a).to be_empty
     end
+
+    it 'stays initializing when the catalog fetch fails (never activates an empty catalog)' do
+      allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances)
+        .and_return({ eastus: eastus_cfg })
+      allow(actor).to receive_messages(
+        check_health: readiness[:ready], fetch_catalog_entries: nil
+      )
+
+      actor.manual
+
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
+      expect(registry.snapshot.instance(instance_key: key)).to be_nil
+      expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:initializing)
+    end
   end
 
   # ── D4: recovery after initial readiness failure ────────────────────────────
@@ -175,15 +189,41 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
     end
   end
 
-  # ── D16: discovery error boundary — programming errors must not become [] ──
+  # ── D16: discovery error boundary — programming errors must not become nil ──
 
   describe 'discovery error boundary (D16)' do
     it 'propagates programming errors instead of publishing zero offerings' do
-      allow(actor).to receive(:configured_deployments).and_raise(NoMethodError, "undefined method 'deployment'")
+      allow(actor).to receive(:fetch_catalog_entries).and_raise(NoMethodError, "undefined method 'model_id_for'")
 
       expect do
         actor.send(:discover_offerings_for_instance, instance_cfg: {}, instance_key: nil)
       end.to raise_error(NoMethodError)
+    end
+  end
+
+  # ── Catalog-driven discovery ────────────────────────────────────────────────
+
+  describe 'live catalog discovery' do
+    it 'builds one offering per catalog entry from the live endpoint' do
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
+      drafts = actor.send(:build_offering_drafts, entries: catalog, instance_cfg: eastus_cfg,
+                                                  instance_key: key)
+
+      expect(drafts.size).to eq(1)
+      expect(drafts.first.provider_native_key).to eq('gpt-4o-deployment')
+      expect(drafts.first.publication_source).to eq(:provider_catalog)
+    end
+
+    it 'sends bearer tokens on the catalog connection (not only api-key)' do
+      bearer_cfg = {
+        azure_foundry_endpoint: 'https://bearer.services.ai.azure.com',
+        azure_foundry_bearer_token: 'bt-spec'
+      }
+      conn = actor.send(:build_health_connection,
+                        endpoint: bearer_cfg[:azure_foundry_endpoint], instance_cfg: bearer_cfg)
+
+      expect(conn.headers['Authorization']).to eq('Bearer bt-spec')
+      expect(conn.headers['api-key']).to be_nil
     end
   end
 
@@ -204,28 +244,37 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
         .to eq(1), 'unchanged offerings must not bump the publication sequence'
     end
 
-    it 'replaces the snapshot when the deployment set actually changes' do
-      key = key_for(:eastus, instance_cfg: eastus_cfg)
-      doubled = eastus_cfg.merge(
-        azure_foundry_deployments: [
-          { deployment: 'gpt-4o-deployment', model: 'gpt-4o', usage_type: :inference },
-          { deployment: 'embed-deployment', model: 'text-embedding-3-small', usage_type: :embedding }
-        ]
-      )
-      single = actor.send(:discover_offerings_for_instance, instance_cfg: eastus_cfg, instance_key: key)
-      both = actor.send(:discover_offerings_for_instance, instance_cfg: doubled, instance_key: key)
-
+    it 'replaces the snapshot when the catalog actually changes' do
       allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances)
         .and_return({ eastus: eastus_cfg })
       allow(actor).to receive(:check_health).and_return(readiness[:ready])
-      allow(actor).to receive(:discover_offerings_for_instance)
-        .and_return(single, both, both)
+      # First tick (claim + initial discovery) sees one model; the next tick
+      # the endpoint reports an added embedding model.
+      allow(actor).to receive(:fetch_catalog_entries)
+        .and_return(catalog,
+                    catalog + [{ 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small' }])
 
-      actor.manual # initial activate with one deployment
-      actor.manual # tick: second deployment appears → replace
+      actor.manual # initial activate with one model
+      actor.manual # tick: second model appears → replace
 
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
       expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(2)
       expect(registry.snapshot.offerings_for(instance_key: key).size).to eq(2)
+    end
+
+    it 'keeps the last complete snapshot when a refresh fetch fails' do
+      allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances)
+        .and_return({ eastus: eastus_cfg })
+      allow(actor).to receive(:check_health).and_return(readiness[:ready])
+      allow(actor).to receive(:fetch_catalog_entries).and_return(catalog, nil)
+
+      actor.manual # initial activate with one model
+      actor.manual # tick: fetch fails → snapshot untouched
+
+      key = key_for(:eastus, instance_cfg: eastus_cfg)
+      expect(registry.snapshot.instance(instance_key: key).availability.state).to eq(:available)
+      expect(registry.snapshot.offerings_for(instance_key: key).size).to eq(1)
+      expect(registry.snapshot.publication_status(instance_key: key).published_sequence).to eq(1)
     end
   end
 
