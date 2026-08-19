@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.3.5] - 2026-08-19
+
+### Changed
+- **Write-time SSOT lane weights** — Build Azure deployment drafts with the shared
+  four-component weight pair using the deployment name as the provider-native
+  offering identity, and reconcile weight-only changes atomically on the existing
+  discovery cadence. Initial/recovery activation now rebuilds from current settings,
+  removal wins readiness races, and dormant configured weights log once per absence
+  period without any Settings lifecycle callback.
+- **Callable-path system conformance** — Capture the rendered Azure/OpenAI-compatible
+  HTTP payload and verify a folded leading system message remains in the dialect-native
+  `role: system` message position.
+- **Dependency floor** — Raise `lex-llm` to `>= 0.7.6` for `WeightSchema`,
+  `WeightReconciler`, and the immutable record weight pair. The `legion-settings`
+  dependency and provider/operator workflow are unchanged.
+
+### Fixed
+- **Malformed-weight startup cleanup** — Validate and build weighted offering
+  drafts before constructing or claiming any callable scope, so invalid weight
+  values cannot leave an orphaned initializing Registry publication. A later
+  corrected discovery pass claims and activates the instance normally without
+  requiring a restart or operator cleanup.
+- **Complete offering replacement comparison** — Ordinary discovery now compares
+  every authoritative `OfferingDraft` field while ignoring only evidence
+  observation timestamps. Deployment order does not churn, duplicate counts stay
+  significant, and native-key, evidence, quota, metadata, publication-source,
+  tier, or weight drift advances the Registry snapshot exactly once.
+
 ## [0.3.4] - 2026-08-18
 
 ### Fixed
