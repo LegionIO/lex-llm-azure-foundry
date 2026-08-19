@@ -55,8 +55,17 @@ module Legion
         end
 
         # Public dispatch methods — chat, stream, embed, count_tokens.
+        #
+        # Canonical boundary (N x N law): pipeline dispatch delivers
+        # Canonical::Message objects; the provider-native Chat facade
+        # delivers lex-llm Message objects. Both are object shapes the
+        # inherited OpenAI-compatible render duck-types (.role/.content/
+        # .tool_calls) and pass through unchanged. Plain Hashes are the
+        # bypass class (the 2026-08-19 incident) — reject loudly, never
+        # silently coerce.
         module ProviderDispatchMethods
           def chat(messages:, model:, **options)
+            enforce_message_boundary!(messages)
             log.info { "chat request model=#{model} messages=#{messages.size}" }
             complete(messages, tools: options.fetch(:tools, {}), temperature: options[:temperature],
                                model: model_info(model, max_tokens: options[:max_tokens]),
@@ -64,6 +73,7 @@ module Legion
           end
 
           def stream(messages:, model:, **options, &)
+            enforce_message_boundary!(messages)
             log.info { "stream request model=#{model} messages=#{messages.size}" }
             complete(messages, tools: options.fetch(:tools, {}), temperature: options[:temperature],
                                model: model_info(model, max_tokens: options[:max_tokens]),
@@ -82,6 +92,7 @@ module Legion
           end
 
           def count_tokens(messages:, model:, **)
+            enforce_message_boundary!(messages)
             {
               provider_family: :azure_foundry, model: model_id(model), supported: false,
               reason: 'Azure AI Foundry REST docs do not define a portable token-counting endpoint.',
@@ -237,6 +248,24 @@ module Legion
           end
 
           private
+
+          # Canonical boundary (N x N law). Pipeline dispatch delivers
+          # Canonical::Message objects; the provider-native Chat facade
+          # delivers lex-llm Message objects. Both are object shapes the
+          # inherited render duck-types, so they pass through unchanged.
+          # Anything else — the plain-Hash bypass class from the
+          # 2026-08-19 incident — is rejected loudly, never coerced.
+          def enforce_message_boundary!(messages)
+            Array(messages).each do |message|
+              next if message.is_a?(Legion::Extensions::Llm::Canonical::Message)
+              next if message.is_a?(Legion::Extensions::Llm::Message)
+
+              raise ArgumentError,
+                    "azure_foundry provider input must be Canonical::Message objects, got #{message.class} — " \
+                    'non-canonical message shapes must not cross the dispatch boundary'
+            end
+            messages
+          end
 
           def surface = (config.azure_foundry_surface || MODEL_INFERENCE_SURFACE).to_sym
 

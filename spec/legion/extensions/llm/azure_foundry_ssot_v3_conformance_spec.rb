@@ -881,7 +881,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       end
 
       it 'wraps a raw string model into a Model::Info for chat' do
-        capturing_callable.chat(messages: [{ role: 'user', content: 'hi' }], model: 'gpt-4o')
+        messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+        capturing_callable.chat(messages: messages, model: 'gpt-4o')
 
         model = capturing.received_models[:chat]
         expect(model).to be_a(Legion::Extensions::Llm::Model::Info)

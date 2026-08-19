@@ -135,6 +135,56 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
                   estimated_input_characters: 5)
   end
 
+  # Dispatch boundary regression (N x N law, 2026-08-19 follow-up):
+  # pipeline dispatch delivers Canonical::Message objects and the
+  # provider-native Chat facade delivers lex-llm Message objects. Plain
+  # Hashes are the bypass class — the lenient hash tolerance is what
+  # masked the 2026-08-19 incident. The public entries reject them
+  # loudly; both accepted object shapes pass through the inherited
+  # OpenAI-compatible render unchanged.
+  describe 'canonical dispatch boundary (N x N law)' do
+    let(:hash_messages) { [{ role: 'user', content: 'hi' }] }
+    let(:canonical_messages) do
+      [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+    end
+    let(:native_messages) { [Legion::Extensions::Llm::Message.new(role: :user, content: 'hi')] }
+
+    it 'rejects plain Hash messages at chat' do
+      expect { provider.chat(messages: hash_messages, model: 'gpt-4o') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'rejects plain Hash messages at stream' do
+      expect { provider.stream(messages: hash_messages, model: 'gpt-4o') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'rejects plain Hash messages at count_tokens' do
+      expect { provider.count_tokens(messages: hash_messages, model: 'gpt-4o') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'passes canonical and provider-native messages through chat to the wire payload' do
+      captured = []
+      allow(provider.connection).to receive(:post) do |_url, payload|
+        captured << payload
+        fake_response({
+                        'model' => 'gpt-4o-prod',
+                        'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'ok' } }],
+                        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 }
+                      })
+      end
+
+      expect(provider.chat(messages: canonical_messages, model: chat_model))
+        .to be_a(Legion::Extensions::Llm::Message)
+      expect(provider.chat(messages: native_messages, model: chat_model))
+        .to be_a(Legion::Extensions::Llm::Message)
+
+      expect(captured.map { |payload| payload[:messages] })
+        .to all(eq([{ role: 'user', content: 'hi' }]))
+    end
+  end
+
   describe '.discover_instances' do
     before do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(nil)

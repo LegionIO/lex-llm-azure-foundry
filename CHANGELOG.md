@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.4.1] - 2026-08-19
+
+### Changed
+- **Canonical dispatch boundary at the public entries.** `chat`, `stream`,
+  and `count_tokens` now enforce the N x N law at the provider edge: they
+  accept `Legion::Extensions::Llm::Canonical::Message` (pipeline dispatch)
+  or the provider-native `Legion::Extensions::Llm::Message` (Chat facade)
+  and reject anything else with a loud `ArgumentError`. Both accepted
+  object shapes pass through the inherited OpenAI-compatible render
+  unchanged (duck-typed `.role`/`.content`/`.tool_calls`), so the Azure
+  OpenAI wire payload is unchanged.
+- **Hash tolerance removed.** Plain-Hash messages were the 2026-08-19
+  bypass class — provider-side leniency masked the defect for the failed
+  openai dispatches. The entries no longer tolerate, coerce, or
+  re-canonicalize hash input; they raise.
+- **Dependency floor** — Raise `lex-llm` to `>= 0.7.7` for the canonical
+  message boundary contract (`Provider#enforce_canonical_messages!`).
+
+### Added
+- **Dispatch-boundary regression coverage.** Loud-reject examples at each
+  public entry for plain-Hash input, and a canonical/native passthrough
+  example verifying both accepted object shapes reach the rendered wire
+  payload unchanged. The fleet model-wrapping spec now feeds canonical
+  messages instead of a hash fixture.
+
 ## [0.4.0] - 2026-08-19
 
 ### Changed
