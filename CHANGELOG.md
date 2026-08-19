@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.4.0] - 2026-08-19
+
+### Changed
+- **Live model catalog discovery — standard lex-llm interface.**
+  `list_models` and `discover_offerings` now fetch the model catalog from
+  the instance's discovery endpoint (`GET models/info?api-version=...` on the
+  model-inference surface, `GET /models` on the OpenAI-compatible surface)
+  and derive offerings through the shared base-class flow — the same
+  endpoint-driven discovery every other provider uses. Offerings are
+  published with `publication_source: :provider_catalog`.
+- **Shared `ModelCatalogParser`.** Both the Provider's `list_models` and the
+  SSOT v3 `DiscoveryRefresh` actor parse the wire catalog through one module
+  (envelope: `data` / `models` / `value` / `deployments` list keys, bare
+  arrays, or a single model object). An unrecognized envelope raises instead
+  of producing a silent empty catalog.
+- **Discovery actor fetches the live catalog.** `discover_offerings_for_instance`
+  hits the same endpoint (and auth) as the readiness probe and builds one
+  OfferingDraft per catalog entry. A failed fetch yields nil so the refresh
+  loop keeps the last complete snapshot rather than deleting it.
+
+### Removed
+- **Configured deployments — the static discovery path is gone.**
+  `azure_foundry_deployments` (and the `deployments` / `provider.deployments`
+  settings aliases) no longer exist. `ProviderClassMethods#resolve_model_id`,
+  `#deployment_config`, `#normalize_deployments`, and the config-driven
+  offering path (`allowed_offerings` / `configured_deployments` /
+  `offering_from_config`) are deleted. The model set is whatever the endpoint
+  reports — nothing about models lives in settings.
+- `provider_native_key` and `model` are both the catalog model id (the
+  routable id the endpoint accepts); the base model name rides along as
+  `canonical_model_alias` when the catalog reports one.
+
+### Fixed
+- **Bearer-token auth on the actor path.** `apply_auth_headers` now sends
+  `Authorization: Bearer` when the instance carries a bearer token
+  (previously api-key only — bearer-only instances failed the readiness
+  probe and stayed `:initializing` forever).
+
+### Notes
+- No captured fixture of the model-inference `models/info` list envelope
+  exists in the monorepo. The parser accepts the known shapes; live
+  confirmation of the wire response against a real project is the one
+  remaining UAT item for this change.
+
 ## [0.3.4] - 2026-08-18
 
 ### Fixed
