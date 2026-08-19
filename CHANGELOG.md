@@ -22,6 +22,11 @@
   values cannot leave an orphaned initializing Registry publication. A later
   corrected discovery pass claims and activates the instance normally without
   requiring a restart or operator cleanup.
+- **Complete offering replacement comparison** — Ordinary discovery now compares
+  every authoritative `OfferingDraft` field while ignoring only evidence
+  observation timestamps. Deployment order does not churn, duplicate counts stay
+  significant, and native-key, evidence, quota, metadata, publication-source,
+  tier, or weight drift advances the Registry snapshot exactly once.
 
 ## [0.3.4] - 2026-08-18
 

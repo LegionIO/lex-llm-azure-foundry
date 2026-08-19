@@ -328,61 +328,47 @@ module Legion
             end
           end
 
-          # Offerings change detection. Time.now observed_at stamps in the
-          # evidence poison Data#==, so a rebuilt-but-unchanged catalog would
-          # otherwise replace the snapshot (and bump the sequence) every tick.
-          # Compare identity/status fields only.
+          # Complete OfferingDraft comparison. Evidence observation timestamps
+          # are telemetry-only; every other draft and evidence field remains
+          # authoritative. Catalog order is set-like and duplicate counts remain
+          # significant.
           module OfferingComparisonHelpers
+            SCALAR_EVIDENCE_FIELDS = %i[
+              context_evidence max_output_evidence embedding_dimensions_evidence
+              model_revision_evidence tokenizer_evidence
+            ].freeze
+
             private
 
             def offerings_changed?(previous:, current:)
-              return true unless previous.size == current.size
+              offerings_contract(previous) != offerings_contract(current)
+            end
 
-              current.any? do |draft|
-                previous.none? { |candidate| drafts_stable?(candidate, draft) }
+            def offerings_contract(offerings)
+              contracts = offerings.map { |draft| stable_offering_contract(draft) }
+              grouped = contracts.group_by do |contract|
+                [contract.fetch(:provider_native_key), contract.fetch(:model)]
               end
+              grouped.sort_by { |identity, _| identity.map { |value| value.to_s.b } }
+                     .to_h.transform_values(&:tally)
             end
 
-            def drafts_stable?(candidate, draft)
-              basic_fields_stable?(candidate, draft) &&
-                evidence_maps_stable?(candidate.operation_evidence, draft.operation_evidence) &&
-                evidence_maps_stable?(candidate.capability_evidence, draft.capability_evidence) &&
-                value_fields_stable?(candidate, draft) &&
-                candidate.quota_domains == draft.quota_domains &&
-                candidate.metadata == draft.metadata
-            end
-
-            def basic_fields_stable?(candidate, draft)
-              candidate.model == draft.model &&
-                candidate.tier == draft.tier &&
-                candidate.weight_inputs == draft.weight_inputs &&
-                candidate.base_weight == draft.base_weight &&
-                evidence_key_set_stable?(candidate.operation_evidence, draft.operation_evidence) &&
-                evidence_key_set_stable?(candidate.capability_evidence, draft.capability_evidence)
-            end
-
-            def evidence_key_set_stable?(previous_map, current_map)
-              previous_map.keys.sort == current_map.keys.sort
-            end
-
-            def evidence_maps_stable?(previous_map, current_map)
-              previous_map.all? do |key, evidence|
-                other = current_map[key]
-                other&.status == evidence.status && other&.source == evidence.source
+            def stable_offering_contract(draft)
+              contract = draft.to_h
+              contract[:operation_evidence] = stable_evidence_map(contract.fetch(:operation_evidence))
+              contract[:capability_evidence] = stable_evidence_map(contract.fetch(:capability_evidence))
+              SCALAR_EVIDENCE_FIELDS.each do |field|
+                contract[field] = stable_evidence(contract.fetch(field))
               end
+              contract
             end
 
-            def value_fields_stable?(candidate, draft)
-              values_stable?(candidate.context_evidence, draft.context_evidence) &&
-                values_stable?(candidate.max_output_evidence, draft.max_output_evidence) &&
-                values_stable?(candidate.embedding_dimensions_evidence, draft.embedding_dimensions_evidence) &&
-                values_stable?(candidate.model_revision_evidence, draft.model_revision_evidence)
+            def stable_evidence_map(evidence_by_key)
+              evidence_by_key.transform_values { |evidence| stable_evidence(evidence) }
             end
 
-            def values_stable?(previous_value, current_value)
-              previous_value.status == current_value.status &&
-                previous_value.value == current_value.value &&
-                previous_value.source == current_value.source
+            def stable_evidence(evidence)
+              evidence.to_h.except(:observed_at)
             end
           end
 

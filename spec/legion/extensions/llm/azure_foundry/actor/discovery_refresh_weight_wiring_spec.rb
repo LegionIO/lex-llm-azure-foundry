@@ -109,6 +109,70 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       expect(state[:offerings].first.weight_inputs[:instance]).to eq(130)
     end
 
+    it 'publishes one replacement when publication source changes without identity, tier, or weight drift' do
+      actor.manual
+      publisher = actor.send(:publisher)
+      original = state[:offerings].fetch(0)
+      changed = Legion::Extensions::Llm::Inventory::OfferingDraft.new(
+        **original.to_h, publication_source: :provider_control_plane
+      )
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      allow(actor).to receive(:discover_offerings_for_instance).and_return([changed])
+
+      actor.manual
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(publication_sequence).to eq(2)
+      expect(state[:sequence]).to eq(2)
+      expect(published_offering.publication_source).to eq(:provider_control_plane)
+    end
+
+    it 'does not replace a freshly observed equivalent two-offering catalog whose order changes' do
+      deployments = [
+        { deployment: 'gpt-4o-deployment', model: 'gpt-4o', usage_type: :inference },
+        { deployment: 'gpt-4o-mini-deployment', model: 'gpt-4o-mini', usage_type: :inference }
+      ]
+      catalog_config = instance_cfg.merge(azure_foundry_deployments: deployments)
+      original = actor.send(
+        :discover_offerings_for_instance, instance_cfg: catalog_config, instance_key: instance_key
+      )
+      reordered = actor.send(
+        :discover_offerings_for_instance,
+        instance_cfg: catalog_config.merge(azure_foundry_deployments: deployments.reverse),
+        instance_key: instance_key
+      )
+      allow(Legion::Extensions::Llm::AzureFoundry).to receive(:discover_instances)
+        .and_return({ eastus: catalog_config })
+      allow(actor).to receive(:discover_offerings_for_instance).and_return(original, reordered)
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+
+      actor.manual
+      actor.manual
+
+      expect(publisher).not_to have_received(:replace_instance_snapshot)
+      expect(publication_sequence).to eq(1)
+      expect(state[:sequence]).to eq(1)
+      expect(registry.snapshot.offerings_for(instance_key: instance_key).size).to eq(2)
+    end
+
+    it 'keeps a duplicate-count change significant through Registry validation' do
+      actor.manual
+      publisher = actor.send(:publisher)
+      original = state[:offerings].fetch(0)
+      allow(publisher).to receive(:replace_instance_snapshot).and_call_original
+      allow(actor).to receive(:discover_offerings_for_instance).and_return([original, original])
+
+      expect do
+        actor.send(:refresh_activated_instance, instance_id: instance_id, state: state)
+      end.to raise_error(Legion::Extensions::Llm::Inventory::Errors::ValidationError, /duplicate provider_native_key/)
+
+      expect(publisher).to have_received(:replace_instance_snapshot).once
+      expect(publication_sequence).to eq(1)
+      expect(state[:sequence]).to eq(1)
+      expect(state[:offerings]).to eq([original])
+    end
+
     it 'does not publish when settings change without changing the weight pair' do
       actor.manual
       publisher = actor.send(:publisher)
