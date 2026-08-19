@@ -12,6 +12,14 @@ require 'legion/extensions/llm'
 # here).
 require_relative 'support/actor_runtime_stubs'
 
+Legion::Logging.setup(
+  level: 'fatal',
+  format: :text,
+  async: false,
+  log_file: File::NULL,
+  log_stdout: false
+)
+
 require 'legion/extensions/llm/azure_foundry'
 
 # Load the SSOT v3 shared example group from the lex-llm gem's spec/ directory
@@ -23,11 +31,3 @@ if Gem.loaded_specs['lex-llm']
                        'spec/legion/extensions/llm/conformance/ssot_provider_examples.rb')
   require kit_file if File.exist?(kit_file)
 end
-
-Legion::Logging.setup(
-  level: 'fatal',
-  format: :text,
-  async: false,
-  log_file: File::NULL,
-  log_stdout: false
-)
