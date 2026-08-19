@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.5] - 2026-08-19
+
+### Changed
+- **Write-time SSOT lane weights** — Build Azure deployment drafts with the shared
+  four-component weight pair using the deployment name as the provider-native
+  offering identity, and reconcile weight-only changes atomically on the existing
+  discovery cadence. Initial/recovery activation now rebuilds from current settings,
+  removal wins readiness races, and dormant configured weights log once per absence
+  period without any Settings lifecycle callback.
+- **Callable-path system conformance** — Capture the rendered Azure/OpenAI-compatible
+  HTTP payload and verify a folded leading system message remains in the dialect-native
+  `role: system` message position.
+- **Dependency floor** — Raise `lex-llm` to `>= 0.7.6` for `WeightSchema`,
+  `WeightReconciler`, and the immutable record weight pair. The `legion-settings`
+  dependency and provider/operator workflow are unchanged.
+
 ## [0.3.4] - 2026-08-18
 
 ### Fixed
