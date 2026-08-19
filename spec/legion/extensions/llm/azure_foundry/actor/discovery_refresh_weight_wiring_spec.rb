@@ -133,6 +133,31 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh do
       end.to raise_error(ArgumentError, /weight component/)
     end
 
+    it 'leaves no claimed scope for malformed weights and cleanly retries after correction' do
+      publisher = actor.send(:publisher)
+      allow(publisher).to receive(:claim_instance).and_call_original
+      set_weights(instance: false)
+
+      actor.manual
+
+      snapshot = registry.snapshot
+      expect(publisher).not_to have_received(:claim_instance)
+      expect(snapshot.each_publication_status.to_a).to be_empty
+      expect(snapshot.each_instance.to_a).to be_empty
+      expect(snapshot.each_offering.to_a).to be_empty
+      expect(actor.instance_variable_get(:@instance_states)).to be_empty
+
+      set_weights(instance: 115)
+      actor.manual
+      actor.manual
+
+      expect(publisher).to have_received(:claim_instance).once
+      expect(registry.snapshot.publication_status(instance_key: instance_key).state).to eq(:complete)
+      expect(registry.snapshot.each_instance.to_a.size).to eq(1)
+      expect(registry.snapshot.offerings_for(instance_key: instance_key).size).to eq(1)
+      expect(state[:published]).to be(true)
+    end
+
     it 'logs each dormant period once, clears on publication, and logs after re-disappearance' do
       logger = instance_double(Logger, info: nil, warn: nil, debug: nil)
       allow(actor).to receive(:log).and_return(logger)

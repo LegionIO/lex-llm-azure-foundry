@@ -622,6 +622,7 @@ module Legion
 
             def build_instance_context(name:, instance_id:, physical_id:, instance_cfg:)
               instance_key = build_instance_key(instance_id: instance_id, physical_id: physical_id)
+              offerings = discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
               callable = Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable.new(
                 instance_cfg: instance_cfg, logger: log
               )
@@ -635,7 +636,7 @@ module Legion
                 name: name, instance_key: instance_key, instance_cfg: instance_cfg,
                 callable: callable, probe_coordinator: probe_coordinator,
                 publisher_token: publisher_token, sequence: 0, last_probe_outcome: nil,
-                offerings: discover_offerings_for_instance(instance_cfg: instance_cfg, instance_key: instance_key)
+                offerings: offerings
               }
             end
 

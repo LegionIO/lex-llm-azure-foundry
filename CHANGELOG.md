@@ -16,6 +16,13 @@
   `WeightReconciler`, and the immutable record weight pair. The `legion-settings`
   dependency and provider/operator workflow are unchanged.
 
+### Fixed
+- **Malformed-weight startup cleanup** — Validate and build weighted offering
+  drafts before constructing or claiming any callable scope, so invalid weight
+  values cannot leave an orphaned initializing Registry publication. A later
+  corrected discovery pass claims and activates the instance normally without
+  requiring a restart or operator cleanup.
+
 ## [0.3.4] - 2026-08-18
 
 ### Fixed
