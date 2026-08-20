@@ -2,13 +2,9 @@
 
 require 'spec_helper'
 
-# The 09 boundary kit (B1/B2) — the single oracle for the dispatch boundary.
-# Loaded from the lex-llm gem's spec/ directory (it ships in the gem but is
-# NOT on the load path); the kit's own self-test specs are not required.
-if Gem.loaded_specs['lex-llm']
-  require File.join(Gem.loaded_specs['lex-llm'].full_gem_path,
-                    'spec/legion/extensions/llm/conformance/ssot_contract_examples')
-end
+# The 09 boundary kit (B1/B2) — the single oracle for the dispatch boundary,
+# loaded by spec_helper per the kit's documented explicit-file consumer
+# pattern (09 §5, contract amendment 2026-08-20).
 
 # Faraday request stand-in for the stubbed connection: the production
 # stream path sets req.options.on_data (Faraday 2) and merges headers.

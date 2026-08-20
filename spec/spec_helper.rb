@@ -22,12 +22,17 @@ Legion::Logging.setup(
 
 require 'legion/extensions/llm/azure_foundry'
 
-# Load the SSOT v3 shared example group from the lex-llm gem's spec/ directory
-# (spec/ ships in the gem but is NOT on the load path). Only the example-group
-# file — the kit directory also contains lex-llm's own self-test specs, which
-# must not run inside a provider gem's suite.
+# Load the conformance kit from the lex-llm gem's spec/ directory (spec/ ships
+# in the gem but is NOT on the load path). Per the kit's documented consumer
+# pattern (conformance.rb, contract amendment 2026-08-20): load BY EXPLICIT
+# NAME — never glob the kit dir, which also ships lex-llm's own self-test
+# specs that LoadError outside this repo.
 if Gem.loaded_specs['lex-llm']
-  kit_file = File.join(Gem.loaded_specs['lex-llm'].full_gem_path,
-                       'spec/legion/extensions/llm/conformance/ssot_provider_examples.rb')
-  require kit_file if File.exist?(kit_file)
+  kit_path = File.join(Gem.loaded_specs['lex-llm'].full_gem_path,
+                       'spec/legion/extensions/llm/conformance')
+  %w[conformance.rb canonical_type_examples.rb client_translator_examples.rb
+     provider_translator_examples.rb provider_tool_rendering_examples.rb
+     ssot_contract_examples.rb ssot_provider_examples.rb].each do |file|
+    require File.join(kit_path, file)
+  end
 end
