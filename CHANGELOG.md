@@ -26,6 +26,11 @@
   `Inventory::ScopedRefresher::LegacyCoordinatorAdapter` compatibility
   adapter is deleted from the discovery actor's `Inventory::Publisher`
   construction (the file no longer exists in lex-llm 0.8.0).
+- **count_tokens returns the 05 §2 Integer heuristic.** The legacy Hash
+  artifact (`supported: false`, `estimated_input_characters`) is deleted
+  and the base heuristic estimate is inherited — operation support is
+  carried by the SSOT data plane (writer operation evidence +
+  `WorkerExecution.require_supported!`), not by a per-call artifact.
 - **Dependency floor** — `lex-llm` raised to `>= 0.8.0` for the SSOT v4
   contract cut (Canonical types, shared boundary helper, Registry read
   path).

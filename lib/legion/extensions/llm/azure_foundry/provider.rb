@@ -54,7 +54,11 @@ module Legion
           end
         end
 
-        # Public dispatch methods — chat, stream, embed, count_tokens.
+        # Public dispatch methods — chat, stream, embed. count_tokens
+        # inherits the base heuristic (Integer estimate, 05 §2) — the
+        # operation's support is carried by the SSOT data plane (writer
+        # operation evidence + WorkerExecution.require_supported!), not by
+        # a per-call artifact.
         #
         # Canonical boundary (N x N law): the shared lex-llm
         # enforce_canonical_messages! helper runs at every message-operation
@@ -89,15 +93,6 @@ module Legion
             payload[:input_type] = options[:input_type] if options[:input_type]
             response = connection.post(embedding_url(model:), payload)
             parse_embedding_response(response, model: model_id(model), text:)
-          end
-
-          def count_tokens(messages:, model:, **)
-            enforce_canonical_messages!(messages)
-            {
-              provider_family: :azure_foundry, model: model_id(model), supported: false,
-              reason: 'Azure AI Foundry REST docs do not define a portable token-counting endpoint.',
-              estimated_input_characters: messages.sum { |m| m.text.to_s.length }
-            }
           end
         end
 

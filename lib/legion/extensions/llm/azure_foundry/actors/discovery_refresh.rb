@@ -1091,7 +1091,10 @@ module Legion
 
             def count_tokens(messages:, model:, **rest)
               provider.enforce_canonical_messages!(messages)
-              provider.count_tokens(messages: messages, model: model, **rest)
+              # The base heuristic ignores params (05 §2) — the fleet rest
+              # folds into the params: slot rather than splatting into the
+              # fixed base signature.
+              provider.count_tokens(messages: messages, model: model, params: rest)
             end
 
             # D17: production dispatch raises Legion::Extensions::Llm::*Error

@@ -145,10 +145,12 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(chat_payload[:model]).to eq('gpt-4o-prod')
   end
 
-  it 'returns a conservative token counting placeholder' do
-    expect(provider.count_tokens(messages: [message], model: 'gpt-4o-prod'))
-      .to include(provider_family: :azure_foundry, model: 'gpt-4o-prod', supported: false,
-                  estimated_input_characters: 5)
+  # 05 §2: count_tokens returns the base heuristic Integer estimate. Azure
+  # has no portable counting endpoint — the support signal lives in the SSOT
+  # data plane (writer operation evidence), not in a per-call artifact.
+  it 'returns the base heuristic Integer estimate for canonical messages' do
+    # 'brief' = 5 characters -> ceil(5 / 4) = 2 estimated tokens.
+    expect(provider.count_tokens(messages: [message], model: 'gpt-4o-prod')).to eq(2)
   end
 
   # Dispatch boundary regression (N x N law, 08 F2, kit B1): pipeline
