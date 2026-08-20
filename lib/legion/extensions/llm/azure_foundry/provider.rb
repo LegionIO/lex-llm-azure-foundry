@@ -56,47 +56,47 @@ module Legion
 
         # Public dispatch methods — chat, stream, embed, count_tokens.
         #
-        # Canonical boundary (N x N law): pipeline dispatch delivers
-        # Canonical::Message objects; the provider-native Chat facade
-        # delivers lex-llm Message objects. Both are object shapes the
-        # inherited OpenAI-compatible render duck-types (.role/.content/
-        # .tool_calls) and pass through unchanged. Plain Hashes are the
-        # bypass class (the 2026-08-19 incident) — reject loudly, never
-        # silently coerce.
+        # Canonical boundary (N x N law): the shared lex-llm
+        # enforce_canonical_messages! helper runs at every message-operation
+        # entry (08 F2, 12/O05 — one shared helper, called at every
+        # operation entry). Pipeline dispatch (direct SelectionDispatch,
+        # fleet worker rehydration) delivers Canonical::Message objects and
+        # nothing else; plain Hashes are the bypass class (the 2026-08-19
+        # incident) — rejected loudly, never silently coerced. The model
+        # travels as the Selection-derived String, untouched (08 F3, B4);
+        # sampling params travel as Canonical::Params (05 O4).
         module ProviderDispatchMethods
-          def chat(messages:, model:, **options)
-            enforce_message_boundary!(messages)
+          def chat(messages, model:, **options)
+            enforce_canonical_messages!(messages)
             log.info { "chat request model=#{model} messages=#{messages.size}" }
-            complete(messages, tools: options.fetch(:tools, {}), temperature: options[:temperature],
-                               model: model_info(model, max_tokens: options[:max_tokens]),
-                               params: options.fetch(:params, {}), tool_prefs: options[:tool_prefs])
+            complete(messages, tools: options.fetch(:tools, {}),
+                               model: model,
+                               params: canonical_params(options), tool_prefs: options[:tool_prefs])
           end
 
-          def stream(messages:, model:, **options, &)
-            enforce_message_boundary!(messages)
+          def stream(messages, model:, **options, &)
+            enforce_canonical_messages!(messages)
             log.info { "stream request model=#{model} messages=#{messages.size}" }
-            complete(messages, tools: options.fetch(:tools, {}), temperature: options[:temperature],
-                               model: model_info(model, max_tokens: options[:max_tokens]),
-                               params: options.fetch(:params, {}), tool_prefs: options[:tool_prefs], &)
+            complete(messages, tools: options.fetch(:tools, {}),
+                               model: model,
+                               params: canonical_params(options), tool_prefs: options[:tool_prefs], &)
           end
 
           def embed(text:, model:, **options)
+            enforce_model_allowed!(model)
             log.info { "embed request model=#{model}" }
-            payload = Utils.deep_merge(
-              render_embedding_payload(text, model: model_id(model), dimensions: options[:dimensions]),
-              options.fetch(:params, {})
-            )
+            payload = render_embedding_payload(text, model: model_id(model), dimensions: options[:dimensions])
             payload[:input_type] = options[:input_type] if options[:input_type]
             response = connection.post(embedding_url(model:), payload)
             parse_embedding_response(response, model: model_id(model), text:)
           end
 
           def count_tokens(messages:, model:, **)
-            enforce_message_boundary!(messages)
+            enforce_canonical_messages!(messages)
             {
               provider_family: :azure_foundry, model: model_id(model), supported: false,
               reason: 'Azure AI Foundry REST docs do not define a portable token-counting endpoint.',
-              estimated_input_characters: messages.sum { |m| m.content.to_s.length }
+              estimated_input_characters: messages.sum { |m| m.text.to_s.length }
             }
           end
         end
@@ -144,59 +144,17 @@ module Legion
           end
         end
 
-        # Offering construction from a live-discovered Model::Info. Capability
-        # policy resolution mirrors the other providers: real catalog facts
-        # (streaming/tools/vision/embedding) feed CapabilityPolicy with the
-        # base-class provider/instance/model settings cascade.
-        module ProviderOfferingHelpers
-          private
-
-          def offering_from_model(model, health: {})
-            policy = resolve_catalog_capability_policy(model)
-            family = model.family&.to_sym
-
-            Legion::Extensions::Llm::Routing::ModelOffering.new(
-              provider_family: :azure_foundry,
-              instance_id: provider_instance_id,
-              transport: offering_transport,
-              tier: offering_tier,
-              model: model.id,
-              canonical_model_alias: model.name,
-              model_family: family,
-              usage_type: model.embedding? ? :embedding : :inference,
-              capabilities: policy[:capabilities],
-              capability_sources: policy[:sources],
-              limits: {
-                context_window: model.context_length,
-                max_output_tokens: model.max_output_tokens
-              }.compact,
-              health: health,
-              metadata: { model_family: family }.compact
-            )
-          end
-
-          def resolve_catalog_capability_policy(model)
-            real = Array(model.capabilities).to_h do |cap|
-              [cap.to_s.downcase.tr('-', '_').tr(' ', '_').to_sym, true]
-            end
-            Legion::Extensions::Llm::CapabilityPolicy.resolve(
-              real: real,
-              provider_catalog: {},
-              probe: {},
-              provider_envelope: { streaming: true },
-              provider_config: provider_capability_config,
-              instance_config: instance_capability_config,
-              model_config: model_capability_config(model.id)
-            )
-          end
-        end
-
         # Azure AI Foundry and Azure OpenAI hosted provider surface.
+        #
+        # Offerings are produced ONLY by the discovery actor's writer path
+        # (OfferingDraft + Registry publication, 07 C1-C5); the base read
+        # path discover_offerings serves the activated inventory offerings
+        # from the Registry snapshot (07 C5). The legacy offering
+        # production path (and its capability-policy cascade) is gone.
         class Provider < Legion::Extensions::Llm::Provider
           include Legion::Extensions::Llm::Provider::OpenAICompatible
           extend ProviderClassMethods
           include ProviderCatalogHelpers
-          include ProviderOfferingHelpers
           include ProviderDispatchMethods
 
           DEFAULT_API_VERSION = '2024-05-01-preview'
@@ -249,24 +207,6 @@ module Legion
 
           private
 
-          # Canonical boundary (N x N law). Pipeline dispatch delivers
-          # Canonical::Message objects; the provider-native Chat facade
-          # delivers lex-llm Message objects. Both are object shapes the
-          # inherited render duck-types, so they pass through unchanged.
-          # Anything else — the plain-Hash bypass class from the
-          # 2026-08-19 incident — is rejected loudly, never coerced.
-          def enforce_message_boundary!(messages)
-            Array(messages).each do |message|
-              next if message.is_a?(Legion::Extensions::Llm::Canonical::Message)
-              next if message.is_a?(Legion::Extensions::Llm::Message)
-
-              raise ArgumentError,
-                    "azure_foundry provider input must be Canonical::Message objects, got #{message.class} — " \
-                    'non-canonical message shapes must not cross the dispatch boundary'
-            end
-            messages
-          end
-
           def surface = (config.azure_foundry_surface || MODEL_INFERENCE_SURFACE).to_sym
 
           def health_baseline(live)
@@ -276,11 +216,14 @@ module Legion
               api_base: api_base, surface: surface }
           end
 
-          def model_info(model, max_tokens: nil)
-            return model if model.respond_to?(:id) && max_tokens.nil?
-
-            Legion::Extensions::Llm::Model::Info.new(id: model_id(model), provider: :azure_foundry,
-                                                     max_output_tokens: max_tokens)
+          # Fleet dispatch hands the canonical param spellings as flat kwargs
+          # (the client translators already translated the wire dialect,
+          # 03 O03a). One canonical home for the complete funnel:
+          # Canonical::Params (05 O4 — temperature lives only there).
+          def canonical_params(options)
+            Legion::Extensions::Llm::Canonical::Params.from_hash(
+              options.slice(*Legion::Extensions::Llm::Canonical::Params.members)
+            )
           end
 
           def api_version = config.azure_foundry_api_version || DEFAULT_API_VERSION

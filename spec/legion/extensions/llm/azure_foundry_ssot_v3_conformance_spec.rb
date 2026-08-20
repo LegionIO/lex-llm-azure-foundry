@@ -15,24 +15,36 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
+# The production base Provider's shared dispatch-boundary helper (08 F2):
+# the recording doubles stand in for the per-instance Provider, so they must
+# expose the same enforce entry the production callable drives.
+module AzureFoundrySpecEnforcement
+  def enforce_canonical_messages!(messages)
+    @base_enforcer ||= Legion::Extensions::Llm::Provider.allocate
+    @base_enforcer.enforce_canonical_messages!(messages)
+  end
+end
+
 # Spec double standing in for AzureFoundry::Provider at the dispatch boundary.
 # The production AzureFoundryCallable is used verbatim; only the per-instance
 # Provider (the HTTP boundary) is replaced so specs never touch the network.
 class RecordingAzureFoundryProvider
+  include AzureFoundrySpecEnforcement
+
   attr_reader :call_count
 
   def initialize
     @call_count = 0
   end
 
-  def chat(**kwargs)
+  def chat(_messages, model:, **)
     @call_count += 1
-    { role: 'assistant', content: 'test response', model: kwargs[:model] }
+    { role: 'assistant', content: 'test response', model: }
   end
 
-  def stream(**kwargs)
+  def stream(_messages, model:, **, &)
     @call_count += 1
-    { role: 'assistant', content: 'streamed response', model: kwargs[:model] }
+    { role: 'assistant', content: 'streamed response', model: }
   end
 
   def embed(**kwargs)
@@ -47,20 +59,22 @@ class RecordingAzureFoundryProvider
 end
 
 # Captures the exact `model:` value each dispatch op hands to the provider
-# boundary, proving the D15 raw-string-model handling (the counting double
-# above cannot, because it ignores model).
+# boundary, proving the raw-string-model passthrough (08 F3/B4 — the counting
+# double above cannot, because it ignores model).
 class ModelCapturingAzureFoundryProvider
+  include AzureFoundrySpecEnforcement
+
   attr_reader :received_models
 
   def initialize
     @received_models = {}
   end
 
-  def chat(model:, **)
+  def chat(_messages, model:, **)
     record(:chat, model)
   end
 
-  def stream(model:, **)
+  def stream(_messages, model:, **, &)
     record(:stream_chat, model)
   end
 
@@ -864,13 +878,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(outcome.reason.length).to be <= 1024
     end
 
-    describe 'fleet raw-string model (D15)' do
+    describe 'fleet raw-string model (08 F3, B4)' do
       # The fleet passes model: as the offering's raw model id (String). The
-      # chat/stream_chat render path calls model.id (stock
-      # OpenAICompatible#render_payload), so the callable must hand the
-      # provider a Model::Info there; embed/count_tokens are string-tolerant
-      # (Provider#model_id accepts the value verbatim), so wrapping them would
-      # serialize a Data object into the wire payload or response.
+      # 0.8.0 render path puts the model on the wire untouched — the callable
+      # hands the provider the exact string for every operation: no
+      # Model::Info fabrication, no re-derivation (B4).
       let(:capturing) { ModelCapturingAzureFoundryProvider.new }
       let(:capturing_callable) do
         described_class.new(
@@ -880,28 +892,25 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         )
       end
 
-      it 'wraps a raw string model into a Model::Info for chat' do
+      it 'passes the raw string model verbatim for chat' do
         messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
-        capturing_callable.chat(messages: messages, model: 'gpt-4o')
+        capturing_callable.chat(messages, model: 'gpt-4o')
 
-        model = capturing.received_models[:chat]
-        expect(model).to be_a(Legion::Extensions::Llm::Model::Info)
-        expect(model.id).to eq('gpt-4o')
-        expect(model.provider).to eq(:azure_foundry)
+        expect(capturing.received_models[:chat]).to eq('gpt-4o')
       end
 
-      it 'wraps a raw string model into a Model::Info for stream_chat' do
-        capturing_callable.stream_chat(messages: [], model: 'gpt-4o')
+      it 'passes the raw string model verbatim for stream_chat' do
+        capturing_callable.stream_chat([], model: 'gpt-4o')
 
-        model = capturing.received_models[:stream_chat]
-        expect(model).to be_a(Legion::Extensions::Llm::Model::Info)
-        expect(model.id).to eq('gpt-4o')
+        expect(capturing.received_models[:stream_chat]).to eq('gpt-4o')
       end
 
       it 'forwards the stream block to the provider' do
         streamed = []
         block_capturing = Class.new do
-          define_method(:stream) do |**, &block|
+          include AzureFoundrySpecEnforcement
+
+          define_method(:stream) do |_messages, **, &block|
             block.call({ delta: 'chunk' })
           end
         end.new
@@ -910,14 +919,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
           logger: Logger.new(File::NULL),
           provider: block_capturing
         )
-        block_callable.stream_chat(messages: [], model: 'gpt-4o') { |chunk| streamed << chunk }
+        block_callable.stream_chat([], model: 'gpt-4o') { |chunk| streamed << chunk }
         expect(streamed).to eq([{ delta: 'chunk' }])
-      end
-
-      it 'passes a Model::Info through unchanged for chat' do
-        info = Legion::Extensions::Llm::Model::Info.new(id: 'gpt-4o', provider: :azure_foundry)
-        capturing_callable.chat(messages: [], model: info)
-        expect(capturing.received_models[:chat]).to equal(info)
       end
 
       it 'passes the raw model verbatim for embed and count_tokens' do

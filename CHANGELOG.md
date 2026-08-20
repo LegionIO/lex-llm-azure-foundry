@@ -1,29 +1,43 @@
 # Changelog
 
-## [0.4.1] - 2026-08-19
+## [0.4.1] - 2026-08-20
 
 ### Changed
-- **Canonical dispatch boundary at the public entries.** `chat`, `stream`,
-  and `count_tokens` now enforce the N x N law at the provider edge: they
-  accept `Legion::Extensions::Llm::Canonical::Message` (pipeline dispatch)
-  or the provider-native `Legion::Extensions::Llm::Message` (Chat facade)
-  and reject anything else with a loud `ArgumentError`. Both accepted
-  object shapes pass through the inherited OpenAI-compatible render
-  unchanged (duck-typed `.role`/`.content`/`.tool_calls`), so the Azure
-  OpenAI wire payload is unchanged.
-- **Hash tolerance removed.** Plain-Hash messages were the 2026-08-19
-  bypass class — provider-side leniency masked the defect for the failed
-  openai dispatches. The entries no longer tolerate, coerce, or
-  re-canonicalize hash input; they raise.
-- **Dependency floor** — Raise `lex-llm` to `>= 0.7.7` for the canonical
-  message boundary contract (`Provider#enforce_canonical_messages!`).
+- **0.8.0 conformance (lex-llm SSOT v4 contract cut).** Legacy type usage
+  is gone: the dispatch entries accept
+  `Legion::Extensions::Llm::Canonical::Message` only, and the shared
+  lex-llm `enforce_canonical_messages!` helper runs at every
+  message-operation entry on both entry forms (the provider entries and
+  the `AzureFoundryCallable` — 08 F2, 12/O05). The per-provider
+  `enforce_message_boundary!` re-implementation (which still accepted the
+  deleted legacy `Llm::Message` shape) is removed.
+- **Render from canonical, model untouched (08 R1/F3, B4).** `chat`/`stream`
+  build `Canonical::Params` from the canonical-spelling dispatch kwargs
+  (temperature lives only in `Canonical::Params`, 05 O4) and pass the
+  Selection-derived model String to the wire unchanged — the
+  `Model::Info` dispatch-time wrapping (and the callable's `to_model_info`
+  fabrication) is deleted.
+- **Offering read path is the Registry snapshot (07 C5).** The legacy
+  `offering_from_model` → `Routing::ModelOffering` production (with its
+  `CapabilityPolicy` cascade) is deleted; the discovery actor's writer
+  (`OfferingDraft` + `Registry` publication) is the sole offering path and
+  `discover_offerings` serves the activated inventory offerings.
+- **Legacy coordinator wiring removed.** The
+  `Inventory::ScopedRefresher::LegacyCoordinatorAdapter` compatibility
+  adapter is deleted from the discovery actor's `Inventory::Publisher`
+  construction (the file no longer exists in lex-llm 0.8.0).
+- **Dependency floor** — `lex-llm` raised to `>= 0.8.0` for the SSOT v4
+  contract cut (Canonical types, shared boundary helper, Registry read
+  path).
 
 ### Added
 - **Dispatch-boundary regression coverage.** Loud-reject examples at each
-  public entry for plain-Hash input, and a canonical/native passthrough
-  example verifying both accepted object shapes reach the rendered wire
-  payload unchanged. The fleet model-wrapping spec now feeds canonical
-  messages instead of a hash fixture.
+  public entry for plain-Hash input, and a canonical passthrough example
+  verifying canonical messages reach the rendered wire payload unchanged
+  and the sync response is a `Canonical::Response`.
+- **Raw-string-model passthrough spec.** The fleet model id travels to the
+  provider boundary verbatim for every operation (no Model::Info
+  fabrication, 08 F3/B4).
 
 ## [0.4.0] - 2026-08-19
 

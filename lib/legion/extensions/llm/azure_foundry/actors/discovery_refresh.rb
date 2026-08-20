@@ -12,7 +12,6 @@ require 'legion/extensions/llm/inventory/identity'
 require 'legion/extensions/llm/inventory/records'
 require 'legion/extensions/llm/inventory/evidence'
 require 'legion/extensions/llm/inventory/probe_coordinator'
-require 'legion/extensions/llm/inventory/scoped_refresher'
 require 'legion/extensions/llm/inventory/weight_reconciler'
 require 'legion/extensions/llm/routing/provider_outcome'
 require 'legion/extensions/llm/taxonomies'
@@ -281,7 +280,7 @@ module Legion
                 model_revision_evidence: absent_value_evidence,
                 tokenizer_evidence: absent_value_evidence,
                 quota_domains: build_quota_domains(model_id: model_id),
-                metadata: build_offering_metadata(entry: entry, model_id: model_id, base_name: base_name,
+                metadata: build_offering_metadata(model_id: model_id, base_name: base_name,
                                                   instance_key: instance_key).freeze,
                 publication_source: :provider_catalog,
                 **weight_fields(instance_key: instance_key, provider_native_key: model_id,
@@ -329,8 +328,13 @@ module Legion
               }
             end
 
-            def build_offering_metadata(entry:, model_id:, base_name:, instance_key:)
-              meta = { raw_catalog: entry }
+            # Metadata is frozen and secret-free (07 R6): the raw catalog
+            # entry is NOT embedded — its wire keys (max_output_tokens and
+            # friends) collide with the secret-key token scan and would
+            # break publication of any live catalog. The draft's evidence
+            # members carry every authoritative value the entry reports.
+            def build_offering_metadata(model_id:, base_name:, instance_key:)
+              meta = {}
               meta[:canonical_model_alias] = base_name if base_name
               meta[:model_family] =
                 Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_family_for(base_name || model_id)
@@ -595,10 +599,7 @@ module Legion
 
             def publisher
               @publisher ||= Legion::Extensions::Llm::Inventory::Publisher.new(
-                provider_family: :azure_foundry,
-                compatibility_adapter: Legion::Extensions::Llm::Inventory::ScopedRefresher::LegacyCoordinatorAdapter.new(
-                  provider_family: :azure_foundry
-                )
+                provider_family: :azure_foundry
               )
             end
 
@@ -888,8 +889,8 @@ module Legion
           # status API (D14). <config_name> is the settings key the instance was
           # discovered under — never the derived host:port id.
           module DiscoveryHealthDisplay
-            # Fleet operation → legacy capability name, matching
-            # ScopedRefresher::LegacyCoordinatorAdapter's LEGACY_CAPABILITIES.
+            # Fleet operation → capability name written into the D14 settings
+            # display hash (read by the legion-llm status API).
             LEGACY_CAPABILITY_NAMES = {
               chat: :completion,
               stream_chat: :streaming,
@@ -1047,12 +1048,11 @@ module Legion
           # and `normalize_dispatch_error(error:)` contracts required by
           # Inventory::CallableHandle and Routing::ProviderOutcome.
           #
-          # The fleet passes `model:` as a raw string (the offering's model id).
-          # chat/stream_chat render paths call `model.id` (the stock
-          # OpenAICompatible#render_payload), so a Model::Info is required
-          # there; embed/count_tokens are string-tolerant (Provider#model_id
-          # accepts the value verbatim), so those pass through — wrapping them
-          # would serialize a Data object into the wire payload/response.
+          # The callable is the second canonical entry form (08 F2, 12/O05):
+          # the shared lex-llm enforce_canonical_messages! helper runs at each
+          # message-operation entry. The fleet passes `model:` as the
+          # offering's model id (String) — it travels to the wire untouched
+          # (08 F3, B4: no model re-derivation, no Model::Info fabrication).
           class AzureFoundryCallable
             def initialize(instance_cfg:, logger:, provider: nil)
               @instance_cfg = instance_cfg
@@ -1075,12 +1075,14 @@ module Legion
               @logger.debug { '[azure_foundry][callable] disconnected' }
             end
 
-            def chat(messages:, model:, **rest)
-              provider.chat(messages: messages, model: to_model_info(model), **rest)
+            def chat(messages, model:, **rest)
+              provider.enforce_canonical_messages!(messages)
+              provider.chat(messages, model: model, **rest)
             end
 
-            def stream_chat(messages:, model:, **rest, &)
-              provider.stream(messages: messages, model: to_model_info(model), **rest, &)
+            def stream_chat(messages, model:, **rest, &)
+              provider.enforce_canonical_messages!(messages)
+              provider.stream(messages, model: model, **rest, &)
             end
 
             def embed(text:, model:, **rest)
@@ -1088,6 +1090,7 @@ module Legion
             end
 
             def count_tokens(messages:, model:, **rest)
+              provider.enforce_canonical_messages!(messages)
               provider.count_tokens(messages: messages, model: model, **rest)
             end
 
@@ -1131,12 +1134,6 @@ module Legion
 
             def model_missing_outcome?(outcome, error:)
               outcome.kind == :provider_error && error_status(error: error) == 404
-            end
-
-            def to_model_info(model)
-              return model if model.respond_to?(:id)
-
-              Legion::Extensions::Llm::Model::Info.new(id: model.to_s, provider: :azure_foundry)
             end
 
             # An explicit Azure endpoint-deactivation code is the ONLY signal

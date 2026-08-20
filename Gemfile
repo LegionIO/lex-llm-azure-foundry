@@ -15,7 +15,7 @@ group :development do
 end
 
 group :test do
-  # The published lex-llm (>= 0.7.6, declared in the gemspec) provides the
+  # The published lex-llm (>= 0.8.0, declared in the gemspec) provides the
   # WeightSchema/WeightReconciler and Canonical types these specs require.
   # Use the local checkout when present (development); CI resolves the
   # published gem via the gemspec dependency.
