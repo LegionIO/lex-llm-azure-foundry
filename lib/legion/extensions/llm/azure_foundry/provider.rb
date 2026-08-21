@@ -44,7 +44,6 @@ module Legion
           def default_tier = :cloud
           def configuration_requirements = %i[azure_foundry_endpoint]
           def capabilities = Capabilities
-          def registry_publisher = AzureFoundry.registry_publisher
 
           def configuration_options
             %i[

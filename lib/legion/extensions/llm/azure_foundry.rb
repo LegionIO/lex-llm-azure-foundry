@@ -38,10 +38,6 @@ module Legion
 
         def self.provider_class = Provider
 
-        def self.registry_publisher
-          @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
-        end
-
         def self.discover_instances
           instances = {}
           discover_default_instance(instances)

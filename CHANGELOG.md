@@ -31,6 +31,18 @@
   and the base heuristic estimate is inherited — operation support is
   carried by the SSOT data plane (writer operation evidence +
   `WorkerExecution.require_supported!`), not by a per-call artifact.
+- **§2 single publication engine (0.8.0 core contract).** The gem-level
+  `registry_publisher` singleton and the `Provider.registry_publisher`
+  class method are removed: nothing in the gem, the lex-llm core, or
+  legion-llm calls them (the discovery actor publishes through
+  `Inventory::Publisher`, the sole engine), and the 0.8.0
+  `RegistryPublisher` now carries the operator's `provider_instance`
+  identity — a gem-level construction site has no instance scope to
+  carry one.
+- **L6 fleet responder kwargs.** `FleetWorker.handle_fleet_request` no
+  longer passes the `provider_class:`/`provider_instances:` params the
+  0.8.0 core deleted from `ProviderResponder.call` (v3 dispatch is
+  exact-only and never constructs a provider at the runner).
 - **Dependency floor** — `lex-llm` raised to `>= 0.8.0` for the SSOT v4
   contract cut (Canonical types, shared boundary helper, Registry read
   path).

@@ -27,11 +27,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(described_class.provider_class).to eq(described_class::Provider)
   end
 
-  it 'delegates registry_publisher to the base RegistryPublisher' do
-    publisher = described_class.registry_publisher
-
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:azure_foundry)
+  it 'does not expose a registry_publisher class method on Provider (§2 single engine)' do
+    expect(described_class::Provider).not_to respond_to(:registry_publisher)
   end
 
   it 'exposes Azure AI Foundry model inference endpoint helpers' do
@@ -122,15 +119,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(models).to all(be_a(Legion::Extensions::Llm::Model::Info))
     expect(models.map(&:provider)).to all(eq(:azure_foundry))
     expect(models.map(&:id)).to eq(%w[gpt-4o-prod embedding-prod])
-  end
-
-  it 'builds sanitized lex-llm registry events for Azure Foundry model availability' do
-    model = provider.list_models.first
-    events = capture_registry_events([model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:azure_foundry)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('gpt-4o-prod')
   end
 
   it 'renders chat payloads through the shared OpenAI-compatible adapter' do
@@ -459,15 +447,5 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       'https://example.openai.azure.com/openai/v1/models',
       'https://example.openai.azure.com/openai/v1/embeddings'
     ]
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :azure_foundry)
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
   end
 end
