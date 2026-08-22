@@ -1,20 +1,23 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
+require 'legion/extensions/llm/inventory/registry'
+
+# The runner is NOT on the default require path outside the daemon — explicit.
+require 'legion/extensions/llm/azure_foundry/runners/discovery'
 
 RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
-  let(:message) { Legion::Extensions::Llm::Message.new(role: :user, content: 'brief') }
-  let(:chat_model) { Legion::Extensions::Llm::Model::Info.new(id: 'gpt-4o-prod', provider: :azure_foundry) }
+  let(:message) { Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'brief') }
 
   before do
+    Legion::Extensions::Llm::Inventory::Registry.reset!
     Legion::Extensions::Llm.configure do |config|
       config.azure_foundry_endpoint = 'https://example.services.ai.azure.com'
       config.azure_foundry_api_key = 'test-key'
       config.azure_foundry_bearer_token = nil
       config.azure_foundry_api_version = '2024-05-01-preview'
       config.azure_foundry_surface = :model_inference
-      config.azure_foundry_deployments = configured_deployments
     end
   end
 
@@ -26,11 +29,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(described_class.provider_class).to eq(described_class::Provider)
   end
 
-  it 'delegates registry_publisher to the base RegistryPublisher' do
-    publisher = described_class.registry_publisher
-
-    expect(publisher).to be_a(Legion::Extensions::Llm::RegistryPublisher)
-    expect(publisher.provider_family).to eq(:azure_foundry)
+  it 'does not expose a registry_publisher class method on Provider (§2 single engine)' do
+    expect(described_class::Provider).not_to respond_to(:registry_publisher)
   end
 
   it 'exposes Azure AI Foundry model inference endpoint helpers' do
@@ -65,25 +65,45 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(composed_openai_v1_urls).to eq(expected_openai_v1_urls)
   end
 
-  it 'maps configured deployments to Azure Foundry routing offerings without live calls' do
-    expect(offering_snapshot).to match(offering_matcher)
+  # Read path (07 C5): discover_offerings serves the activated inventory
+  # lanes from the Registry snapshot; the discovery runner's writer is the
+  # sole publication path (live catalog -> OfferingDraft -> Registry lanes).
+  it 'serves the writer-published inventory lanes from the Registry snapshot' do
+    publish_default_instance
+    lanes = provider.discover_offerings(live: true)
+    chat = lanes.find { |lane| lane.operation == :chat && lane.model == 'gpt-4o-prod' }
+    embedding = lanes.find { |lane| lane.operation == :embed }
+
+    expect(lanes).to all(be_a(Legion::Extensions::Llm::Inventory::LaneRecord))
+    expect(chat.instance_key.provider_family).to eq(:azure_foundry)
+    expect(chat.metadata[:canonical_model_alias]).to eq('gpt-4o')
+    expect(chat.capability_evidence[:streaming].status).to eq(:supported)
+    expect(chat.capability_evidence[:tools].status).to eq(:supported)
+    expect(embedding.metadata[:canonical_model_alias]).to eq('text-embedding-3-small')
+    # The embedding model publishes an embed lane only — no chat lane.
+    expect(lanes.none? { |lane| lane.model == 'embedding-prod' && lane.operation == :chat }).to be(true)
   end
 
-  it 'preserves deployment names while requiring explicit metadata when the base model cannot be proven' do
-    offering = provider.offering_for(model: 'private-mistral-eastus', model_family: :mistral)
+  it 'preserves catalog-reported names and infers family from the base model' do
+    publish_default_instance
+    lane = provider.discover_offerings(live: true)
+                   .find { |l| l.operation == :chat && l.model == 'gpt-4o-prod' }
 
-    expect(offering.to_h).to include(provider_family: :azure_foundry, model: 'private-mistral-eastus')
-    expect(offering.metadata).to include(model_family: :mistral, requires_explicit_model_metadata: true)
+    expect(lane.instance_key.provider_family).to eq(:azure_foundry)
+    expect(lane.model).to eq('gpt-4o-prod')
+    expect(lane.metadata).to include(model_family: :openai)
   end
 
-  it 'uses provider instance transport, tier, and instance id in offerings' do
-    expect(configured_transport_offering.to_h).to include(transport: :rabbitmq, tier: :fleet, instance_id: :eastus)
-  end
+  it 'uses the provider instance tier and instance id in the published lanes' do
+    publish_instance(instance_id: 'eastus', tier: :fleet)
+    lane = described_class::Provider.new(
+      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
+      azure_foundry_api_key: 'test-key',
+      instance_id: :eastus
+    ).discover_offerings(live: true).first
 
-  it 'resolves configured aliases back to deployment names' do
-    model = described_class::Provider.resolve_model_id('gpt-4o', config: Legion::Extensions::Llm.config)
-
-    expect(model).to eq('gpt-4o-prod')
+    expect(lane.tier).to eq(:fleet)
+    expect(lane.instance_key.instance_id).to eq('eastus')
   end
 
   it 'reports non-live health without network calls' do
@@ -100,23 +120,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(readiness).not_to have_key(:circuit_state)
   end
 
-  it 'returns an array of Model::Info instances from list_models' do
-    models = provider.list_models
-
-    expect(models).to be_an(Array)
-    expect(models).to all(be_a(Legion::Extensions::Llm::Model::Info))
-    expect(models.map(&:provider)).to all(eq(:azure_foundry))
-  end
-
-  it 'builds sanitized lex-llm registry events for Azure Foundry model availability' do
-    model = provider.list_models.first
-    events = capture_registry_events([model], readiness: { ready: true })
-
-    expect(events.first.to_h).to include(event_type: :offering_available)
-    expect(events.first.to_h.dig(:offering, :provider_family)).to eq(:azure_foundry)
-    expect(events.first.to_h.dig(:offering, :model)).to eq('gpt-4o-prod')
-  end
-
   it 'renders chat payloads through the shared OpenAI-compatible adapter' do
     expect(chat_payload).to include(model: 'gpt-4o-prod',
                                     messages: [{ role: 'user', content: 'brief' }],
@@ -125,10 +128,61 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
                                     reasoning_effort: 'medium')
   end
 
-  it 'returns a conservative token counting placeholder' do
-    expect(provider.count_tokens(messages: [message], model: 'gpt-4o-prod'))
-      .to include(provider_family: :azure_foundry, model: 'gpt-4o-prod', supported: false,
-                  estimated_input_characters: 5)
+  it 'renders the Selection-derived model to the wire untouched (no re-derivation)' do
+    expect(chat_payload[:model]).to eq('gpt-4o-prod')
+  end
+
+  # 05 §2: count_tokens returns the base heuristic Integer estimate. Azure
+  # has no portable counting endpoint — the support signal lives in the SSOT
+  # data plane (writer operation evidence), not in a per-call artifact.
+  it 'returns the base heuristic Integer estimate for canonical messages' do
+    # 'brief' = 5 characters -> ceil(5 / 4) = 2 estimated tokens.
+    expect(provider.count_tokens(messages: [message], model: 'gpt-4o-prod')).to eq(2)
+  end
+
+  # Dispatch boundary regression (N x N law, 08 F2, kit B1): pipeline
+  # dispatch delivers Canonical::Message objects and nothing else. Plain
+  # Hashes are the bypass class — the lenient hash tolerance is what masked
+  # the 2026-08-19 incident. Every message-operation entry runs the shared
+  # lex-llm enforce helper and rejects non-canonical shapes loudly.
+  describe 'canonical dispatch boundary (N x N law)' do
+    let(:hash_messages) { [{ role: 'user', content: 'hi' }] }
+    let(:canonical_messages) do
+      [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hi')]
+    end
+
+    it 'rejects plain Hash messages at chat' do
+      expect { provider.chat(hash_messages, model: 'gpt-4o') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'rejects plain Hash messages at stream' do
+      expect { provider.stream(hash_messages, model: 'gpt-4o') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'rejects plain Hash messages at count_tokens' do
+      expect { provider.count_tokens(messages: hash_messages, model: 'gpt-4o') }
+        .to raise_error(ArgumentError, /Canonical::Message/)
+    end
+
+    it 'passes canonical messages through chat to the wire payload and returns a Canonical::Response' do
+      captured = []
+      allow(provider.connection).to receive(:post) do |_url, payload|
+        captured << payload
+        fake_response({
+                        'model' => 'gpt-4o-prod',
+                        'choices' => [{ 'message' => { 'role' => 'assistant', 'content' => 'ok' } }],
+                        'usage' => { 'prompt_tokens' => 1, 'completion_tokens' => 1 }
+                      })
+      end
+
+      response = provider.chat(canonical_messages, model: 'gpt-4o-prod')
+      expect(response).to be_a(Legion::Extensions::Llm::Canonical::Response)
+
+      expect(captured.map { |payload| payload[:messages] })
+        .to all(eq([{ role: 'user', content: 'hi' }]))
+    end
   end
 
   describe '.discover_instances' do
@@ -195,17 +249,16 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(instances[:prod]).to include(tier: :fleet)
     end
 
-    it 'normalizes endpoint aliases and deployment settings' do
+    it 'normalizes endpoint aliases and API version settings' do
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
         .with(:extensions, :llm, :azure_foundry)
         .and_return({ base_url: 'https://openai.azure.com', api_key: 'ak-123',
-                      api_version: '2024-05-01-preview', deployments: ['gpt-4o'] })
+                      api_version: '2024-05-01-preview' })
 
       expect(described_class.discover_instances[:settings]).to include(
         azure_foundry_endpoint: 'https://openai.azure.com',
         azure_foundry_api_key: 'ak-123',
-        azure_foundry_api_version: '2024-05-01-preview',
-        azure_foundry_deployments: ['gpt-4o']
+        azure_foundry_api_version: '2024-05-01-preview'
       )
     end
 
@@ -215,8 +268,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         .and_return({ instances: { shrutich: {
                       endpoint: 'https://shrutich.openai.azure.com/openai/v1',
                       credentials: { api_key: 'ak-nested', bearer_token: 'bt-nested' },
-                      provider: { surface: 'openai_v1', api_version: '2024-05-01-preview',
-                                  deployments: ['gpt-4o-mini'] }
+                      provider: { surface: 'openai_v1', api_version: '2024-05-01-preview' }
                     } } })
 
       expect(described_class.discover_instances[:shrutich]).to include(
@@ -224,8 +276,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         azure_foundry_api_key: 'ak-nested',
         azure_foundry_bearer_token: 'bt-nested',
         azure_foundry_surface: 'openai_v1',
-        azure_foundry_api_version: '2024-05-01-preview',
-        azure_foundry_deployments: ['gpt-4o-mini']
+        azure_foundry_api_version: '2024-05-01-preview'
       )
     end
 
@@ -240,12 +291,23 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'excludes the instances sub-key from the default instance config' do
-      cfg = { endpoint: 'https://main.azure.com', instances: { extra: { endpoint: 'https://extra.azure.com' } } }
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry).and_return(cfg)
+      # Both instances carry a credential: the credential-less reject is
+      # asserted by its own examples above; here the invariant under test is
+      # that the instances sub-key does not leak into the default config.
+      cfg = { endpoint: 'https://main.azure.com', api_key: 'ak-main',
+              instances: { extra: { endpoint: 'https://extra.azure.com', api_key: 'ak-extra' } } }
+      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(cfg)
 
       expect(described_class.discover_instances[:settings]).not_to have_key(:instances)
     end
+  end
+
+  def default_catalog_entries
+    [
+      { 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
+        'max_output_tokens' => 16_384 },
+      { 'id' => 'embedding-prod', 'model_name' => 'text-embedding-3-small' }
+    ]
   end
 
   def default_settings_snapshot
@@ -257,7 +319,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       endpoint: instance[:endpoint],
       api_version: instance.dig(:provider, :api_version),
       surface: instance.dig(:provider, :surface),
-      deployments: instance.dig(:provider, :deployments),
       fleet: instance[:fleet],
       usage: instance[:usage]
     }
@@ -270,56 +331,62 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       endpoint: nil,
       api_version: '2024-05-01-preview',
       surface: nil,
-      deployments: [],
       fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed tools]),
       usage: hash_including(inference: true, embedding: true)
     }
   end
 
-  def configured_deployments
-    [
-      {
-        deployment: 'gpt-4o-prod',
-        model_family: :openai,
-        canonical_model_alias: 'gpt-4o',
-        usage_type: :inference
-      },
-      {
-        deployment: 'embedding-prod',
-        model_family: :openai,
-        canonical_model_alias: 'text-embedding-3-small',
-        usage_type: :embedding
-      }
-    ]
-  end
-
-  def offering_snapshot
-    offerings = provider.discover_offerings(live: false)
-    chat = offerings.find { |offering| offering.model == 'gpt-4o-prod' }
-    embedding = offerings.find(&:embedding?)
-    {
-      provider_family: chat.provider_family,
-      chat_metadata: chat.metadata,
-      chat_capabilities: chat.capabilities,
-      embedding_metadata: embedding.metadata,
-      embedding_usage_type: embedding.usage_type
-    }
-  end
-
-  def offering_matcher
-    {
-      provider_family: :azure_foundry,
-      chat_metadata: include(model_family: :openai, canonical_model_alias: 'gpt-4o'),
-      chat_capabilities: include(:streaming, :tools, :vision),
-      embedding_metadata: include(model_family: :openai, canonical_model_alias: 'text-embedding-3-small'),
-      embedding_usage_type: :embedding
-    }
-  end
-
+  # 08 R1 render boundary: canonical inputs in (model String, Canonical::Params,
+  # Canonical::Thinking::Config), provider wire out.
   def chat_payload
-    provider.send(:render_payload, [message], tools: {}, temperature: 0.2, model: chat_model, stream: true,
-                                              schema: nil, thinking: { effort: 'medium' }, tool_prefs: nil)
+    params = Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.2)
+    thinking = Legion::Extensions::Llm::Canonical::Thinking::Config.build(effort: 'medium')
+    provider.send(:render_payload, [message], tools: {}, model: 'gpt-4o-prod', stream: true,
+                                              schema: nil, thinking:, params:, tool_prefs: nil)
   end
+
+  # Publishes the default catalog through the production writer path
+  # (discovery runner draft builder + Inventory::Publisher) under the given
+  # instance id, so the base Registry-snapshot read path has lanes to serve.
+  def publish_instance(instance_id: 'default', tier: :cloud)
+    instance_cfg = {
+      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
+      azure_foundry_api_key: 'test-key',
+      tier:
+    }
+    runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
+    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :azure_foundry, instance_id:,
+      physical_id: runner.derive_physical_id(instance_cfg:)
+    )
+    publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
+    callable = Legion::Extensions::Llm::AzureFoundry::Helpers::Callable.new(
+      instance_cfg:, logger: Logger.new(File::NULL)
+    )
+    coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
+      instance_key: key, enqueue: ->(**) { true }
+    )
+    token = publisher.claim_instance(instance_id:, physical_id: key.physical_id, callable:,
+                                     probe_request_handle: coordinator)
+    probe = publisher.readiness_probe_started(instance_id:, publisher_token: token,
+                                              physical_id: key.physical_id)
+    publisher.activate_instance_snapshot(instance_id:, publisher_token: token,
+                                         offerings: catalog_drafts(instance_cfg:, instance_key: key),
+                                         sequence: 0, probe_token: probe,
+                                         physical_id: key.physical_id)
+  end
+
+  # The production runner's per-entry draft builder over the default catalog.
+  def catalog_drafts(instance_cfg:, instance_key:)
+    runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
+    default_catalog_entries.map do |entry|
+      runner.send(:build_offering_draft, instance_cfg:, instance_key:,
+                                         model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                                         model_data: entry)
+    end
+  end
+
+  def publish_default_instance = publish_instance
 
   def endpoint_helpers
     [
@@ -342,17 +409,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       checked: false,
       status: 'healthy'
     }
-  end
-
-  def configured_transport_offering
-    described_class::Provider.new(
-      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
-      azure_foundry_api_key: 'test-key',
-      azure_foundry_deployments: configured_deployments,
-      instance_id: :eastus,
-      transport: :rabbitmq,
-      tier: :fleet
-    ).offering_for(model: 'private-mistral-eastus', model_family: :mistral)
   end
 
   def expected_model_inference_endpoints
@@ -386,15 +442,5 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       'https://example.openai.azure.com/openai/v1/models',
       'https://example.openai.azure.com/openai/v1/embeddings'
     ]
-  end
-
-  def capture_registry_events(models, readiness:)
-    publisher = Legion::Extensions::Llm::RegistryPublisher.new(provider_family: :azure_foundry)
-    events = []
-    allow(publisher).to receive(:publishing_available?).and_return(true)
-    allow(publisher).to receive(:publish_event) { |event| events << event }
-    allow(publisher).to receive(:schedule).and_yield
-    publisher.publish_models_async(models, readiness:)
-    events
   end
 end

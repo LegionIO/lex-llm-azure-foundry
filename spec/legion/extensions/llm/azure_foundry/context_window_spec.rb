@@ -2,110 +2,85 @@
 
 require 'spec_helper'
 
-# Regression: Azure Foundry offerings were built WITHOUT limits[:context_window],
+# The runner is NOT on the default require path outside the daemon — explicit.
+require 'legion/extensions/llm/azure_foundry/runners/discovery'
+
+# Regression: Azure Foundry lanes were published WITHOUT a context window,
 # so the router saw azure lanes as unknown/unbounded capacity (cw=nil on
 # /api/llm/offerings).
 #
-# Architecture: each Azure deployment/endpoint is discovered as a lane through
-# the SAME standard offering path every other provider uses. Azure's own
-# inference endpoints (model_inference GET /info, openai_v1 GET /models) do NOT
-# report per-model context length, so context_window flows from the discovered
-# model catalog when the endpoint provides it, otherwise from the per-deployment
-# instance config (keys :context_window / :max_input_tokens). When neither is
-# present the window is simply nil — a per-instance gap, never a hardcoded guess.
-RSpec.describe 'Legion::Extensions::Llm::AzureFoundry::Provider context window' do
-  subject(:provider) { Legion::Extensions::Llm::AzureFoundry::Provider.new(Legion::Extensions::Llm.config) }
+# Architecture (07 C1-C5): each discovered model is published through the
+# discovery runner's writer path, which carries the context window as
+# context_evidence (ValueEvidence). The value flows from the live model
+# catalog when the entry reports it (context_window / max_input_tokens /
+# context_length), else from the instance-level config (keys :context_window /
+# :max_input_tokens). When neither is present the window is simply unknown —
+# a per-instance gap, never a hardcoded guess.
+RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' do
+  # The production writer seam: the discovery runner's own draft builder with
+  # harness-supplied catalog entries (no network involved).
+  def draft_for_model(model_id, entries, instance_cfg: {})
+    runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
+    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
+      provider_family: :azure_foundry, instance_id: 'context-window-spec'
+    )
+    cfg = {
+      azure_foundry_endpoint: 'https://ctx.example.services.ai.azure.com',
+      azure_foundry_api_key: 'ak-ctx-spec'
+    }.merge(instance_cfg)
+    drafts = entries.filter_map do |entry|
+      runner.send(:build_offering_draft, instance_cfg: cfg, instance_key: key,
+                                         model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                                         model_data: entry)
+    end
+    drafts.find { |draft| draft.model == model_id }
+  end
 
-  before do
-    Legion::Extensions::Llm.configure do |config|
-      config.azure_foundry_endpoint = 'https://example.services.ai.azure.com'
-      config.azure_foundry_api_key = 'test-key'
-      config.azure_foundry_surface = :model_inference
-      config.azure_foundry_deployments = deployments
+  context 'when the catalog entry reports an explicit context_window' do
+    let(:entries) do
+      [{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o',
+         'context_window' => 128_000, 'max_output_tokens' => 16_384 }]
+    end
+
+    it 'flows context_window into the context evidence (not just metadata)' do
+      draft = draft_for_model('gpt-4o-prod', entries)
+
+      expect(draft.context_evidence.status).to eq(:known)
+      expect(draft.context_evidence.value).to eq(128_000)
+      expect(draft.context_evidence.source).to eq(:provider_catalog)
+    end
+
+    it 'flows max_output_tokens into the max-output evidence when declared' do
+      draft = draft_for_model('gpt-4o-prod', entries)
+
+      expect(draft.max_output_evidence.status).to eq(:known)
+      expect(draft.max_output_evidence.value).to eq(16_384)
     end
   end
 
-  def offering_for_model(model_id)
-    provider.discover_offerings(live: false).find { |o| o.model == model_id }
-  end
+  context 'when the catalog entry reports max_input_tokens instead' do
+    it 'derives a known context window from max_input_tokens' do
+      draft = draft_for_model('custom-llama', [{ 'id' => 'custom-llama', 'max_input_tokens' => 32_768 }])
 
-  context 'when the deployment config declares an explicit context_window' do
-    let(:deployments) do
-      [{ deployment: 'gpt-4o-prod', canonical_model_alias: 'gpt-4o', usage_type: :inference,
-         context_window: 128_000, max_output_tokens: 16_384 }]
-    end
-
-    it 'flows context_window into limits (not just metadata)' do
-      offering = offering_for_model('gpt-4o-prod')
-
-      expect(offering.limits[:context_window]).to eq(128_000)
-      expect(offering.context_window).to eq(128_000)
-    end
-
-    it 'flows max_output_tokens into limits when declared' do
-      expect(offering_for_model('gpt-4o-prod').limits[:max_output_tokens]).to eq(16_384)
+      expect(draft.context_evidence.status).to eq(:known)
+      expect(draft.context_evidence.value).to eq(32_768)
     end
   end
 
-  context 'when the deployment config declares max_input_tokens instead' do
-    let(:deployments) do
-      [{ deployment: 'custom-llama', usage_type: :inference, max_input_tokens: 32_768 }]
+  context 'when the catalog entry reports no context info' do
+    it 'falls back to the instance-level context_window config' do
+      draft = draft_for_model('private-mystery-model', [{ 'id' => 'private-mystery-model' }],
+                              instance_cfg: { context_window: 64_000 })
+
+      expect(draft.context_evidence.status).to eq(:known)
+      expect(draft.context_evidence.value).to eq(64_000)
     end
 
-    it 'derives a non-nil context_window from max_input_tokens' do
-      expect(offering_for_model('custom-llama').context_window).to eq(32_768)
+    it 'leaves the context window unknown rather than guessing from a hardcoded table' do
+      draft = draft_for_model('private-mystery-model', [{ 'id' => 'private-mystery-model' }])
+
+      expect(draft.context_evidence.status).to eq(:unknown)
+      expect(draft.context_evidence.value).to be_nil
     end
-  end
-
-  context 'when the deployment declares no context info (per-instance gap)' do
-    let(:deployments) { [{ deployment: 'private-mystery-model', usage_type: :inference }] }
-
-    it 'leaves context_window nil rather than guessing from a hardcoded table' do
-      expect(offering_for_model('private-mystery-model').context_window).to be_nil
-    end
-  end
-
-  context 'when reporting through list_models / Model::Info' do
-    let(:deployments) do
-      [{ deployment: 'gpt-4o-prod', canonical_model_alias: 'gpt-4o', usage_type: :inference,
-         context_window: 128_000 }]
-    end
-
-    it 'populates Model::Info#context_length so the models API reports it' do
-      info = provider.list_models.find { |m| m.id == 'gpt-4o-prod' }
-
-      expect(info.context_length).to eq(128_000)
-    end
-  end
-
-  context 'when a live model catalog reports context length' do
-    let(:deployments) { [{ deployment: 'gpt-4o-prod', usage_type: :inference }] }
-
-    it 'sources context_window from the discovered catalog entry' do
-      stub_catalog('model_name' => 'gpt-4o-prod', 'context_window' => 200_000)
-
-      offering = provider.discover_offerings(live: true).find { |o| o.model == 'gpt-4o-prod' }
-
-      expect(offering.context_window).to eq(200_000)
-    end
-  end
-
-  context 'when live discovery runs but the catalog omits context (real Azure behavior)' do
-    let(:deployments) do
-      [{ deployment: 'gpt-4o-prod', usage_type: :inference, context_window: 128_000 }]
-    end
-
-    it 'preserves the config-declared context_window through the live merge' do
-      stub_catalog('model_name' => 'gpt-4o-prod', 'model_type' => 'chat_completion')
-
-      offering = provider.discover_offerings(live: true).find { |o| o.model == 'gpt-4o-prod' }
-
-      expect(offering.context_window).to eq(128_000)
-    end
-  end
-
-  def stub_catalog(body)
-    allow(provider.connection).to receive(:get).with(provider.models_url)
-                                               .and_return(Struct.new(:body).new(body))
   end
 end
