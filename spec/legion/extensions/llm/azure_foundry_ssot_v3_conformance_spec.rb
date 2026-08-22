@@ -15,6 +15,9 @@ require 'legion/extensions/llm/capabilities'
 require 'legion/extensions/llm/fleet/worker_execution'
 require 'legion/extensions/llm/fleet/protocol'
 
+# The runner is NOT on the default require path outside the daemon — explicit.
+require 'legion/extensions/llm/azure_foundry/runners/discovery'
+
 # The production base Provider's shared dispatch-boundary helper (08 F2):
 # the recording doubles stand in for the per-instance Provider, so they must
 # expose the same enforce entry the production callable drives.
@@ -26,7 +29,7 @@ module AzureFoundrySpecEnforcement
 end
 
 # Spec double standing in for AzureFoundry::Provider at the dispatch boundary.
-# The production AzureFoundryCallable is used verbatim; only the per-instance
+# The production Helpers::Callable is used verbatim; only the per-instance
 # Provider (the HTTP boundary) is replaced so specs never touch the network.
 class RecordingAzureFoundryProvider
   include AzureFoundrySpecEnforcement
@@ -96,10 +99,10 @@ end
 
 # Harness class for Azure Foundry SSOT v3 conformance testing. Implements the
 # full interface required by the shared conformance examples without touching
-# any external service: the production AzureFoundryCallable is used, with the
+# any external service: the production Helpers::Callable is used, with the
 # per-instance Provider (HTTP boundary) replaced by a recording double.
-# Identity and offering-draft construction delegate to the production actor's
-# real helpers (no harness re-implementation that can drift).
+# Identity and offering-draft construction delegate to the production runner
+# module's real helpers (no harness re-implementation that can drift).
 class AzureFoundrySsotHarness
   # `name` is the operator's CONFIG NAME — the instance_id the discovery actor
   # publishes (the key the router resolves instances.<name> settings by).
@@ -152,11 +155,11 @@ class AzureFoundrySsotHarness
   end
 
   def physical_id(instance_config:)
-    discovery_actor.send(:derive_physical_id, instance_cfg: instance_config)
+    discovery_runner.send(:derive_physical_id, instance_cfg: instance_config)
   end
 
   def build_callable(instance_config:)
-    Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable.new(
+    Legion::Extensions::Llm::AzureFoundry::Helpers::Callable.new(
       instance_cfg: instance_config,
       logger: Logger.new(File::NULL),
       provider: RecordingAzureFoundryProvider.new
@@ -170,17 +173,17 @@ class AzureFoundrySsotHarness
       instance_id: instance_id(instance_config: config),
       physical_id: physical_id(instance_config: config)
     )
-    # Production draft path with harness-supplied catalog entries: the actor's
-    # own build_offering_drafts (operation evidence, capability evidence,
-    # context window, quota domains, metadata) — no network involved.
-    discovery_actor.send(:build_offering_drafts,
-                         entries: catalog_entries(instance_config), instance_cfg: config,
-                         instance_key: instance_key)
+    # Production draft path with harness-supplied catalog entries (operation/
+    # capability evidence, context, quota domains, metadata) — no network.
+    catalog_entries(instance_config).map do |entry|
+      discovery_runner.send(:build_offering_draft,
+                            instance_cfg: config, instance_key: instance_key,
+                            model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                            model_data: entry)
+    end
   end
 
-  def catalog_entries(instance_config)
-    CATALOGS.fetch(instance_config[:name].to_s)
-  end
+  def catalog_entries(instance_config) = CATALOGS.fetch(instance_config[:name].to_s)
 
   def safe_readiness(instance_config:, **)
     Legion::Extensions::Llm::Inventory::ReadinessResult.new(
@@ -226,11 +229,11 @@ class AzureFoundrySsotHarness
 
   private
 
-  # Production discovery actor used as the source of the real identity and
-  # offering-draft helpers (no timer: the spec stub of Every has none, so
-  # instances are inert until driven manually).
-  def discovery_actor
-    @discovery_actor ||= Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh.new
+  # The production discovery runner module, used as the source of the real
+  # identity and offering-draft helpers (module-level: it carries
+  # derive_physical_id / build_offering_draft via `extend self`).
+  def discovery_runner
+    @discovery_runner ||= Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
   end
 end
 
@@ -332,12 +335,12 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       }
     end
 
-    it 'creates separate offerings for each catalog model on the same instance' do
+    it 'creates separate lanes for each catalog model on the same instance' do
       ctx = bring_up_instance(config)
       snapshot = registry.snapshot
-      offerings = snapshot.offerings_for(instance_key: ctx[:key])
-      expect(offerings.size).to eq(2)
-      models = offerings.map(&:model).sort
+      lanes = snapshot.lanes_for(instance_key: ctx[:key])
+      expect(lanes.size).to eq(2)
+      models = lanes.map(&:model).sort
       expect(models).to eq(%w[embed-deployment gpt-4o-deployment])
     end
 
@@ -692,10 +695,10 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   describe 'exact fleet worker execution contract' do
     let(:config) { ssot_harness.instance_configs[0] }
 
-    def activate_offering
+    def activate_lane
       ctx = bring_up_instance(config)
-      offering = registry.snapshot.offerings_for(instance_key: ctx[:key]).first
-      { publisher: ctx[:publisher], token: ctx[:token], offering:, callable: ctx[:callable], key: ctx[:key] }
+      lane = registry.snapshot.lanes_for(instance_key: ctx[:key]).find { |l| l.operation == :chat }
+      { publisher: ctx[:publisher], token: ctx[:token], lane:, callable: ctx[:callable], key: ctx[:key] }
     end
 
     before do
@@ -706,7 +709,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'rejects a mismatched offering_id' do
-      ctx = activate_offering
+      ctx = activate_lane
       envelope = mismatched_offering_id_envelope(ctx: ctx)
       expect do
         Legion::Extensions::Llm::Fleet::WorkerExecution.call(envelope: envelope, registry: registry)
@@ -714,7 +717,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'rejects an unsupported operation' do
-      ctx = activate_offering
+      ctx = activate_lane
       envelope = unsupported_operation_envelope(ctx: ctx)
       expect do
         Legion::Extensions::Llm::Fleet::WorkerExecution.call(envelope: envelope, registry: registry)
@@ -722,7 +725,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'rejects a mismatched model' do
-      ctx = activate_offering
+      ctx = activate_lane
       envelope = mismatched_model_envelope(ctx: ctx)
       expect do
         Legion::Extensions::Llm::Fleet::WorkerExecution.call(envelope: envelope, registry: registry)
@@ -730,7 +733,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'rejects an unavailable instance' do
-      ctx = activate_offering
+      ctx = activate_lane
       registry.dispatch_instance_unavailable(
         instance_key: ctx[:key], publisher_token_id: ctx[:token].publisher_token_id, reason: 'server down'
       )
@@ -742,22 +745,29 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
     private
 
+    # The fleet envelope's offering_id FIELD carries the lane's 5-tuple
+    # lane_id (the field name is kept for protocol continuity, D4) — the
+    # claim resolves a lane exactly.
     def fleet_base_envelope(ctx:)
       {
         execution_contract: Legion::Extensions::Llm::Fleet::Protocol::EXACT_EXECUTION_CONTRACT,
-        offering_id: ctx[:offering].offering_id,
+        offering_id: ctx[:lane].lane_id,
         provider: 'azure_foundry',
         provider_instance: ctx[:key].instance_id,
-        model: ctx[:offering].model,
+        model: ctx[:lane].model,
         operation: 'chat',
         params: { messages: [] }
       }
     end
 
     def mismatched_offering_id_envelope(ctx:)
-      fleet_base_envelope(ctx: ctx).merge(
-        offering_id: 'off:v1:0000000000000000000000000000000000000000000000000000000000000000'
+      # A well-formed 5-tuple lane id on a FOREIGN instance — structurally
+      # valid, resolvable nowhere on the activated instance.
+      foreign_lane_id = Legion::Extensions::Llm::Inventory::Identity.compose_lane_id(
+        tier: ctx[:lane].tier, provider_family: :azure_foundry, instance_id: 'foreign-instance',
+        type: :inference, model: ctx[:lane].model
       )
+      fleet_base_envelope(ctx: ctx).merge(offering_id: foreign_lane_id)
     end
 
     def unsupported_operation_envelope(ctx:)
@@ -778,13 +788,16 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   describe 'dependency isolation' do
     it 'does not require Legion::LLM (no reverse dependency on top-level llm module)' do
       project_root = File.expand_path('../../../..', __dir__)
-      actor_file = File.read(
-        File.join(project_root, 'lib/legion/extensions/llm/azure_foundry/actors/discovery_refresh.rb')
-      )
-      expect(actor_file).not_to match(/\bLegion::LLM\b/)
+      %w[
+        lib/legion/extensions/llm/azure_foundry/actors/discovery.rb
+        lib/legion/extensions/llm/azure_foundry/runners/discovery.rb
+        lib/legion/extensions/llm/azure_foundry/helpers/callable.rb
+      ].each do |file|
+        expect(File.read(File.join(project_root, file))).not_to match(/\bLegion::LLM\b/), file
+      end
     end
 
-    it 'AzureFoundryCallable does not reference Legion::LLM' do
+    it 'Helpers::Callable does not reference Legion::LLM' do
       callable = ssot_harness.build_callable(instance_config: ssot_harness.instance_configs[0])
       outcome = callable.normalize_dispatch_error(error: RuntimeError.new('test'))
       expect(outcome).to be_a(Legion::Extensions::Llm::Routing::ProviderOutcome)
@@ -820,9 +833,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
   end
 
-  # --- AzureFoundryCallable direct contract ---
+  # --- Helpers::Callable direct contract ---
 
-  describe Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable do
+  describe Legion::Extensions::Llm::AzureFoundry::Helpers::Callable do
     let(:callable) do
       described_class.new(
         instance_cfg: ssot_harness.instance_configs[0],

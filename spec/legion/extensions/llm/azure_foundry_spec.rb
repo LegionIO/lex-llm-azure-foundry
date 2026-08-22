@@ -3,6 +3,9 @@
 require 'spec_helper'
 require 'legion/extensions/llm/inventory/registry'
 
+# The runner is NOT on the default require path outside the daemon — explicit.
+require 'legion/extensions/llm/azure_foundry/runners/discovery'
+
 RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   let(:provider) { described_class::Provider.new(Legion::Extensions::Llm.config) }
   let(:message) { Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'brief') }
@@ -16,7 +19,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       config.azure_foundry_api_version = '2024-05-01-preview'
       config.azure_foundry_surface = :model_inference
     end
-    stub_catalog
   end
 
   it 'exposes provider defaults through the shared provider settings shape' do
@@ -64,38 +66,44 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   end
 
   # Read path (07 C5): discover_offerings serves the activated inventory
-  # offerings from the Registry snapshot; the discovery actor's writer is the
-  # sole publication path (live catalog -> OfferingDraft -> Registry).
-  it 'serves the writer-published inventory offerings from the Registry snapshot' do
+  # lanes from the Registry snapshot; the discovery runner's writer is the
+  # sole publication path (live catalog -> OfferingDraft -> Registry lanes).
+  it 'serves the writer-published inventory lanes from the Registry snapshot' do
     publish_default_instance
-    offerings = provider.discover_offerings(live: true)
-    chat = offerings.find { |offering| offering.model == 'gpt-4o-prod' }
-    embedding = offerings.find { |offering| offering.operation_status(operation: :embed) == :supported }
+    lanes = provider.discover_offerings(live: true)
+    chat = lanes.find { |lane| lane.operation == :chat && lane.model == 'gpt-4o-prod' }
+    embedding = lanes.find { |lane| lane.operation == :embed }
 
-    expect(offerings).to all(be_a(Legion::Extensions::Llm::Inventory::OfferingRecord))
+    expect(lanes).to all(be_a(Legion::Extensions::Llm::Inventory::LaneRecord))
     expect(chat.instance_key.provider_family).to eq(:azure_foundry)
     expect(chat.metadata[:canonical_model_alias]).to eq('gpt-4o')
-    expect(chat.capability_status(capability: :streaming)).to eq(:supported)
-    expect(chat.capability_status(capability: :tools)).to eq(:supported)
+    expect(chat.capability_evidence[:streaming].status).to eq(:supported)
+    expect(chat.capability_evidence[:tools].status).to eq(:supported)
     expect(embedding.metadata[:canonical_model_alias]).to eq('text-embedding-3-small')
-    expect(embedding.operation_status(operation: :chat)).to eq(:unsupported)
+    # The embedding model publishes an embed lane only — no chat lane.
+    expect(lanes.none? { |lane| lane.model == 'embedding-prod' && lane.operation == :chat }).to be(true)
   end
 
   it 'preserves catalog-reported names and infers family from the base model' do
     publish_default_instance
-    offering = provider.discover_offerings(live: true).find { |offering| offering.model == 'gpt-4o-prod' }
+    lane = provider.discover_offerings(live: true)
+                   .find { |l| l.operation == :chat && l.model == 'gpt-4o-prod' }
 
-    expect(offering.instance_key.provider_family).to eq(:azure_foundry)
-    expect(offering.model).to eq('gpt-4o-prod')
-    expect(offering.metadata).to include(model_family: :openai)
+    expect(lane.instance_key.provider_family).to eq(:azure_foundry)
+    expect(lane.model).to eq('gpt-4o-prod')
+    expect(lane.metadata).to include(model_family: :openai)
   end
 
-  it 'uses the provider instance tier and instance id in the published offerings' do
+  it 'uses the provider instance tier and instance id in the published lanes' do
     publish_instance(instance_id: 'eastus', tier: :fleet)
-    offering = configured_transport_provider.discover_offerings(live: true).first
+    lane = described_class::Provider.new(
+      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
+      azure_foundry_api_key: 'test-key',
+      instance_id: :eastus
+    ).discover_offerings(live: true).first
 
-    expect(offering.tier).to eq(:fleet)
-    expect(offering.instance_key.instance_id).to eq('eastus')
+    expect(lane.tier).to eq(:fleet)
+    expect(lane.instance_key.instance_id).to eq('eastus')
   end
 
   it 'reports non-live health without network calls' do
@@ -110,15 +118,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(readiness).to include(provider: :azure_foundry, live: true, local: false, remote: true)
     expect(readiness).to include(ready: true, status: 'healthy')
     expect(readiness).not_to have_key(:circuit_state)
-  end
-
-  it 'returns an array of Model::Info instances from list_models' do
-    models = provider.list_models
-
-    expect(models).to be_an(Array)
-    expect(models).to all(be_a(Legion::Extensions::Llm::Model::Info))
-    expect(models.map(&:provider)).to all(eq(:azure_foundry))
-    expect(models.map(&:id)).to eq(%w[gpt-4o-prod embedding-prod])
   end
 
   it 'renders chat payloads through the shared OpenAI-compatible adapter' do
@@ -292,17 +291,15 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'excludes the instances sub-key from the default instance config' do
-      cfg = { endpoint: 'https://main.azure.com', instances: { extra: { endpoint: 'https://extra.azure.com' } } }
+      # Both instances carry a credential: the credential-less reject is
+      # asserted by its own examples above; here the invariant under test is
+      # that the instances sub-key does not leak into the default config.
+      cfg = { endpoint: 'https://main.azure.com', api_key: 'ak-main',
+              instances: { extra: { endpoint: 'https://extra.azure.com', api_key: 'ak-extra' } } }
       allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(cfg)
 
       expect(described_class.discover_instances[:settings]).not_to have_key(:instances)
     end
-  end
-
-  def stub_catalog(entries = default_catalog_entries)
-    allow(provider.connection).to receive(:get).with(provider.models_url).and_return(
-      fake_response({ 'data' => entries })
-    )
   end
 
   def default_catalog_entries
@@ -311,20 +308,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         'max_output_tokens' => 16_384 },
       { 'id' => 'embedding-prod', 'model_name' => 'text-embedding-3-small' }
     ]
-  end
-
-  def configured_transport_provider
-    p = described_class::Provider.new(
-      azure_foundry_endpoint: 'https://example.services.ai.azure.com',
-      azure_foundry_api_key: 'test-key',
-      instance_id: :eastus,
-      transport: :rabbitmq,
-      tier: :fleet
-    )
-    allow(p.connection).to receive(:get).with(p.models_url).and_return(
-      fake_response({ 'data' => default_catalog_entries })
-    )
-    p
   end
 
   def default_settings_snapshot
@@ -363,32 +346,44 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   end
 
   # Publishes the default catalog through the production writer path
-  # (discovery actor draft builder + Inventory::Publisher) under the given
-  # instance id, so the base Registry-snapshot read path has offerings to
-  # serve.
+  # (discovery runner draft builder + Inventory::Publisher) under the given
+  # instance id, so the base Registry-snapshot read path has lanes to serve.
   def publish_instance(instance_id: 'default', tier: :cloud)
     instance_cfg = {
       azure_foundry_endpoint: 'https://example.services.ai.azure.com',
       azure_foundry_api_key: 'test-key',
       tier:
     }
+    runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
     key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
-      provider_family: :azure_foundry, instance_id:
+      provider_family: :azure_foundry, instance_id:,
+      physical_id: runner.derive_physical_id(instance_cfg:)
     )
-    actor = Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh.new
     publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
-    callable = Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable.new(
+    callable = Legion::Extensions::Llm::AzureFoundry::Helpers::Callable.new(
       instance_cfg:, logger: Logger.new(File::NULL)
     )
     coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
       instance_key: key, enqueue: ->(**) { true }
     )
-    token = publisher.claim_instance(instance_id:, callable:, probe_request_handle: coordinator)
-    probe = publisher.readiness_probe_started(instance_id:, publisher_token: token)
-    drafts = actor.send(:build_offering_drafts, entries: default_catalog_entries,
-                                                instance_cfg:, instance_key: key)
-    publisher.activate_instance_snapshot(instance_id:, publisher_token: token, offerings: drafts,
-                                         sequence: 0, probe_token: probe)
+    token = publisher.claim_instance(instance_id:, physical_id: key.physical_id, callable:,
+                                     probe_request_handle: coordinator)
+    probe = publisher.readiness_probe_started(instance_id:, publisher_token: token,
+                                              physical_id: key.physical_id)
+    publisher.activate_instance_snapshot(instance_id:, publisher_token: token,
+                                         offerings: catalog_drafts(instance_cfg:, instance_key: key),
+                                         sequence: 0, probe_token: probe,
+                                         physical_id: key.physical_id)
+  end
+
+  # The production runner's per-entry draft builder over the default catalog.
+  def catalog_drafts(instance_cfg:, instance_key:)
+    runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
+    default_catalog_entries.map do |entry|
+      runner.send(:build_offering_draft, instance_cfg:, instance_key:,
+                                         model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                                         model_data: entry)
+    end
   end
 
   def publish_default_instance = publish_instance

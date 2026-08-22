@@ -95,49 +95,6 @@ module Legion
           end
         end
 
-        # Live model-catalog discovery. The catalog is fetched from the
-        # surface's discovery endpoint (Provider#models_url) and parsed
-        # through ModelCatalogParser — the same module the SSOT v3 discovery
-        # actor uses, so the two paths cannot drift. No instance config
-        # participates: whatever the endpoint reports is the offering set.
-        module ProviderCatalogHelpers
-          def parse_list_models_response(response, _provider, _capabilities)
-            ModelCatalogParser.model_entries(catalog_body(response)).filter_map do |entry|
-              model_id = ModelCatalogParser.model_id_for(entry)
-              next if model_id.to_s.strip.empty?
-
-              model_info_from_catalog_entry(entry, model_id)
-            end
-          end
-
-          private
-
-          def catalog_body(response)
-            body = response.body
-            return body unless body.is_a?(String)
-            return body if body.strip.empty?
-
-            Legion::JSON.parse(body, symbolize_names: false)
-          end
-
-          def model_info_from_catalog_entry(entry, model_id)
-            base_name = ModelCatalogParser.base_model_name_for(entry)
-            family = ModelCatalogParser.model_family_for(base_name || model_id)
-            max_output = entry['max_output_tokens'] || entry[:max_output_tokens]
-            max_output = max_output.to_i if max_output
-            Legion::Extensions::Llm::Model::Info.new(
-              id: model_id,
-              name: base_name || model_id,
-              provider: :azure_foundry,
-              family: family,
-              capabilities: Capabilities.critical_capabilities_for(model_id),
-              context_length: ModelCatalogParser.context_window_for(entry),
-              # Model::Info#max_output_tokens reads metadata[:max_output_tokens].
-              metadata: { raw: entry, max_output_tokens: max_output }.compact
-            )
-          end
-        end
-
         # Azure AI Foundry and Azure OpenAI hosted provider surface.
         #
         # Offerings are produced ONLY by the discovery actor's writer path
@@ -148,7 +105,6 @@ module Legion
         class Provider < Legion::Extensions::Llm::Provider
           include Legion::Extensions::Llm::Provider::OpenAICompatible
           extend ProviderClassMethods
-          include ProviderCatalogHelpers
           include ProviderDispatchMethods
 
           DEFAULT_API_VERSION = '2024-05-01-preview'

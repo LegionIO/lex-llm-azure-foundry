@@ -5,12 +5,11 @@ module Legion
     module Llm
       module AzureFoundry
         # Parses the live model catalog returned by the Azure AI Foundry
-        # inference surface's discovery endpoint. Both discovery paths (the
-        # Provider's list_models and the SSOT v3 DiscoveryRefresh actor)
-        # parse the same wire response through this module so the two can
-        # never drift.
+        # inference surface's discovery endpoint. The SSOT v3 discovery
+        # runner (Runners::Discovery#fetch_raw_models) parses the wire
+        # response through this module — the single catalog parse path.
         #
-        # Endpoint per surface (Provider#models_url / actor catalog_path):
+        # Endpoint per surface (Provider#models_url / runner catalog_path):
         #   model_inference -> GET models/info?api-version=<api_version>
         #   openai_v1       -> GET models  (OpenAI-compatible shape)
         #

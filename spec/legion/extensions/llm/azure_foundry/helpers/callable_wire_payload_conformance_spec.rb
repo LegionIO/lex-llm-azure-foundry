@@ -19,11 +19,11 @@ class AzureFoundryWireRequestStub
   attr_reader :options
 end
 
-# Real callable boundary (09 §5.1): the production AzureFoundryCallable +
+# Real callable boundary (09 §5.1): the production Helpers::Callable +
 # production AzureFoundry::Provider traverse render_payload,
 # parse_completion_response, and stream_response; only the HTTP connection is
 # stubbed (sync bodies and SSE events at the wire edge).
-RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::AzureFoundryCallable do
+RSpec.describe Legion::Extensions::Llm::AzureFoundry::Helpers::Callable do
   let(:instance_cfg) do
     { azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
       azure_foundry_api_key: 'ak-wire-spec', azure_foundry_surface: :model_inference }

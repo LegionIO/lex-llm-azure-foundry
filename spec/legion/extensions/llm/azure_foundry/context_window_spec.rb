@@ -1,41 +1,26 @@
 # frozen_string_literal: true
 
 require 'spec_helper'
-require 'legion/extensions/llm/inventory/registry'
 
-# Regression: Azure Foundry offerings were published WITHOUT a context window,
+# The runner is NOT on the default require path outside the daemon — explicit.
+require 'legion/extensions/llm/azure_foundry/runners/discovery'
+
+# Regression: Azure Foundry lanes were published WITHOUT a context window,
 # so the router saw azure lanes as unknown/unbounded capacity (cw=nil on
 # /api/llm/offerings).
 #
 # Architecture (07 C1-C5): each discovered model is published through the
-# discovery actor's writer path, which carries the context window as
+# discovery runner's writer path, which carries the context window as
 # context_evidence (ValueEvidence). The value flows from the live model
 # catalog when the entry reports it (context_window / max_input_tokens /
 # context_length), else from the instance-level config (keys :context_window /
 # :max_input_tokens). When neither is present the window is simply unknown —
 # a per-instance gap, never a hardcoded guess.
 RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' do
-  subject(:provider) { Legion::Extensions::Llm::AzureFoundry::Provider.new(Legion::Extensions::Llm.config) }
-
-  before do
-    Legion::Extensions::Llm::Inventory::Registry.reset!
-    Legion::Extensions::Llm.configure do |config|
-      config.azure_foundry_endpoint = 'https://example.services.ai.azure.com'
-      config.azure_foundry_api_key = 'test-key'
-      config.azure_foundry_surface = :model_inference
-    end
-  end
-
-  def stub_catalog(entries)
-    allow(provider.connection).to receive(:get).with(provider.models_url).and_return(
-      Struct.new(:body).new({ 'data' => entries })
-    )
-  end
-
-  # The production writer seam: the discovery actor's own draft builder with
+  # The production writer seam: the discovery runner's own draft builder with
   # harness-supplied catalog entries (no network involved).
   def draft_for_model(model_id, entries, instance_cfg: {})
-    actor = Legion::Extensions::Llm::AzureFoundry::Actor::DiscoveryRefresh.new
+    runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
     key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(
       provider_family: :azure_foundry, instance_id: 'context-window-spec'
     )
@@ -43,8 +28,12 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
       azure_foundry_endpoint: 'https://ctx.example.services.ai.azure.com',
       azure_foundry_api_key: 'ak-ctx-spec'
     }.merge(instance_cfg)
-    actor.send(:build_offering_drafts, entries:, instance_cfg: cfg, instance_key: key)
-         .find { |draft| draft.model == model_id }
+    drafts = entries.filter_map do |entry|
+      runner.send(:build_offering_draft, instance_cfg: cfg, instance_key: key,
+                                         model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                                         model_data: entry)
+    end
+    drafts.find { |draft| draft.model == model_id }
   end
 
   context 'when the catalog entry reports an explicit context_window' do
@@ -92,18 +81,6 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
 
       expect(draft.context_evidence.status).to eq(:unknown)
       expect(draft.context_evidence.value).to be_nil
-    end
-  end
-
-  context 'when reporting through list_models / Model::Info' do
-    before do
-      stub_catalog([{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o', 'context_window' => 128_000 }])
-    end
-
-    it 'populates Model::Info#context_length so the models API reports it' do
-      info = provider.list_models.find { |m| m.id == 'gpt-4o-prod' }
-
-      expect(info.context_length).to eq(128_000)
     end
   end
 end
