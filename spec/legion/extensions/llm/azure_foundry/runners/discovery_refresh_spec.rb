@@ -122,6 +122,41 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     end
   end
 
+  # Regression: two DISTINCT deployments of one base model. Each catalog entry
+  # reports a unique deployment_name but a SHARED base model_name / model. The
+  # old multi-key id fallback resolved the base model_name (which ranked above
+  # deployment_name), collapsing both drafts onto one provider_native_key — the
+  # registry Store#build_records then raised ValidationError: duplicate
+  # provider_native_key and the instance never published. The existing catalog
+  # (two DISTINCT ids) never exercised this. The fix resolves the unique
+  # deployment identity, so the two deployments stay distinct.
+  describe 'duplicate provider_native_key regression (shared base model)' do
+    let(:catalog) do
+      [
+        { 'deployment_name' => 'gpt-4o-blue', 'model_name' => 'gpt-4o', 'model' => 'gpt-4o',
+          'context_window' => 128_000 },
+        { 'deployment_name' => 'gpt-4o-green', 'model_name' => 'gpt-4o', 'model' => 'gpt-4o',
+          'context_window' => 128_000 }
+      ]
+    end
+
+    it 'builds one draft per deployment with a distinct provider_native_key (no collapse)' do
+      drafts = runner.build_offerings(instance_cfg: discover_cfg(:eastus), instance_key: key(:eastus))
+
+      expect(drafts.map(&:provider_native_key)).to contain_exactly('gpt-4o-blue', 'gpt-4o-green')
+      expect(drafts.map(&:model)).to contain_exactly('gpt-4o-blue', 'gpt-4o-green')
+    end
+
+    it 'publishes a clean snapshot with one lane per deployment (never a duplicate-key ValidationError)' do
+      runner.refresh
+
+      expect(registry.snapshot.publication_status(instance_key: key(:eastus)).state).to eq(:complete)
+      lanes = registry.snapshot.lanes_for(instance_key: key(:eastus))
+      expect(lanes.map { |lane| [lane.operation, lane.model] }.sort)
+        .to eq([[:chat, 'gpt-4o-blue'], [:chat, 'gpt-4o-green']])
+    end
+  end
+
   describe 'catalog connection' do
     def catalog_connection(instance_cfg)
       runner.send(:build_connection,

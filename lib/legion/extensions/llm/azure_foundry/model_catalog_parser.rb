@@ -24,9 +24,25 @@ module Legion
         # confirmation of the wire shape is still required (see PR).
         module ModelCatalogParser
           CATALOG_LIST_KEYS = %i[data models value models_list deployments].freeze
-          MODEL_ID_KEYS = %i[id name model_name deployment_name model].freeze
+          # Deployment-unique identity keys, most-specific first. An Azure
+          # Foundry *deployment* carries a unique id / deployment_name; the
+          # base-model keys (model_name / model) are deliberately EXCLUDED —
+          # multiple deployments of one base model share them, so resolving
+          # the identity from them collapses two DISTINCT deployments onto one
+          # provider_native_key and the registry Store#build_records raises
+          # ValidationError: duplicate provider_native_key. The routable id is
+          # the deployment, never the shared base model (bedrock's single
+          # :model_id in spirit — one unambiguous key per offering).
+          MODEL_ID_KEYS = %i[id deployment_name name].freeze
           BASE_NAME_KEYS = %i[model_name base_model base_model_name].freeze
           CONTEXT_KEYS = %i[context_window max_input_tokens context_length].freeze
+          # A catalog entry is model-shaped when it carries ANY recognized
+          # model field — INCLUDING the base-model keys. Envelope recognition
+          # (looks_like_model?) is deliberately broader than identity
+          # resolution: a model-shaped entry that lacks a unique deployment id
+          # is still recognized, then dropped by build_offerings' empty-id
+          # filter rather than raising an unrecognized-envelope error.
+          MODEL_SHAPE_KEYS = (MODEL_ID_KEYS + BASE_NAME_KEYS + %i[model]).uniq.freeze
 
           module_function
 
@@ -52,12 +68,13 @@ module Legion
             CATALOG_LIST_KEYS.find { |k| body.key?(k) || body.key?(k.to_s) }
           end
 
-          def looks_like_model?(body) = MODEL_ID_KEYS.any? { |k| body.key?(k) || body.key?(k.to_s) }
+          def looks_like_model?(body) = MODEL_SHAPE_KEYS.any? { |k| body.key?(k) || body.key?(k.to_s) }
 
-          # Resolves the routable model identity for a raw catalog entry. On
-          # the Foundry surface this is the deployment name (what the API
-          # accepts as the model field); on the OpenAI surface it is the
-          # model id.
+          # Resolves the routable, unique-per-deployment identity for a raw
+          # catalog entry. On the Foundry surface this is the deployment name
+          # (what the API accepts as the model field); on the OpenAI surface
+          # it is the model id. Never the shared base model — that collapses
+          # two distinct deployments onto one provider_native_key.
           def model_id_for(entry) = lookup(entry, MODEL_ID_KEYS)&.to_s
 
           # The base/underlying model name, when the catalog reports one

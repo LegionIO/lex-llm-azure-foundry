@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.4.2] - 2026-08-25
+
+### Fixed
+- **Duplicate `provider_native_key` on discovery (collapsing distinct
+  deployments).** Model-id resolution used a multi-key fallback
+  (`id name model_name deployment_name model`) that could resolve two
+  DISTINCT deployments of one base model to the SAME id — the shared base
+  keys `model_name` / `model` ranked at or above the unique
+  `deployment_name`. Two drafts then carried the same `provider_native_key`
+  and the registry `Store#build_records` raised
+  `Legion::Extensions::Llm::Inventory::Errors::ValidationError:
+  duplicate provider_native_key`, so the instance failed to publish.
+  `MODEL_ID_KEYS` now resolves only the unique per-deployment identity
+  (`id deployment_name name`) and never the shared base model — one
+  unambiguous key per offering, matching the bedrock provider's single
+  `:model_id`. Envelope recognition (`looks_like_model?`) keeps its
+  original breadth via a separate `MODEL_SHAPE_KEYS` set, so a model-shaped
+  entry without a unique id is still recognized and then dropped by the
+  empty-id filter rather than raising an unrecognized-envelope error.
+
 ## [0.4.1] - 2026-08-20
 
 ### Changed

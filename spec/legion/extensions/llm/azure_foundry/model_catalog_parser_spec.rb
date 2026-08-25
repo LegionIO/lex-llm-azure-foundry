@@ -38,14 +38,35 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser do
   end
 
   describe '.model_id_for' do
-    %w[id name model_name deployment_name model].each do |key|
-      it "resolves the identity from #{key}" do
+    # Only the deployment-unique keys are identity keys — the base-model keys
+    # (model_name / model) are excluded so two deployments of one base model
+    # never collapse onto one provider_native_key.
+    %w[id deployment_name name].each do |key|
+      it "resolves the identity from the deployment-unique key #{key}" do
         expect(parser.model_id_for(key => 'deploy-1')).to eq('deploy-1')
       end
     end
 
     it 'prefers id over the other identity keys' do
       expect(parser.model_id_for('id' => 'deploy-1', 'name' => 'base-1')).to eq('deploy-1')
+    end
+
+    it 'prefers the unique deployment_name over the ambiguous name' do
+      expect(parser.model_id_for('deployment_name' => 'gpt-4o-blue', 'name' => 'gpt-4o')).to eq('gpt-4o-blue')
+    end
+
+    # Regression: the shared base-model keys must NOT resolve as identity —
+    # two distinct deployments of one base model share them, and using them
+    # collapses both drafts onto one provider_native_key (registry
+    # build_records raises ValidationError: duplicate provider_native_key).
+    %w[model_name model].each do |base_key|
+      it "does NOT resolve the identity from the shared base-model key #{base_key}" do
+        expect(parser.model_id_for(base_key => 'gpt-4o')).to be_nil
+      end
+    end
+
+    it 'resolves the deployment id even when a shared base model is also present' do
+      expect(parser.model_id_for('deployment_name' => 'gpt-4o-blue', 'model' => 'gpt-4o')).to eq('gpt-4o-blue')
     end
 
     it 'returns nil when no identity key is present' do
