@@ -1,9 +1,11 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
-require 'legion/extensions/llm/azure_foundry/actors/discovery_refresh'
+require 'legion/extensions/llm/azure_foundry/helpers/callable'
+require 'legion/extensions/llm/azure_foundry/actors/discovery'
 
 module Legion
   module Extensions
@@ -20,7 +22,7 @@ module Legion
           tier: :frontier,
           transport: :http,
           credentials: { api_key: nil, bearer_token: nil },
-          provider: { api_version: Provider::DEFAULT_API_VERSION, surface: nil, deployments: [] },
+          provider: { api_version: Provider::DEFAULT_API_VERSION, surface: nil },
           usage: { inference: true, embedding: true, image: false },
           limits: { concurrency: 4 },
           fleet: { enabled: false, respond_to_requests: false,
@@ -37,16 +39,25 @@ module Legion
 
         def self.provider_class = Provider
 
-        def self.registry_publisher
-          @registry_publisher ||= Legion::Extensions::Llm::RegistryPublisher.new(provider_family: PROVIDER_FAMILY)
-        end
-
         def self.discover_instances
           instances = {}
           discover_default_instance(instances)
           discover_named_instances(instances)
-          instances
+          # enabled: false is a skip, not a credential: a disabled instance
+          # or one without a resolvable credential is never returned (the
+          # discovery pipeline reads this method as the single claimable
+          # source, and the dispatch path reads it too).
+          instances.reject { |_, config| config[:enabled] == false || unresolved_credential?(config) }
         end
+
+        # The monolith actor's exact claim condition: at least one non-blank
+        # string credential (api key or bearer token).
+        def self.unresolved_credential?(config)
+          !(credential_string?(config[:azure_foundry_api_key]) ||
+            credential_string?(config[:azure_foundry_bearer_token]))
+        end
+
+        def self.credential_string?(value) = value.is_a?(String) && !value.strip.empty?
 
         def self.discover_default_instance(instances)
           cfg = CredentialSources.setting(:extensions, :llm, :azure_foundry)
@@ -104,7 +115,6 @@ module Legion
           normalized[:azure_foundry_bearer_token] ||= normalized.delete(:bearer_token)
           normalized[:azure_foundry_api_version] ||= normalized.delete(:api_version)
           normalized[:azure_foundry_surface] ||= normalized.delete(:surface)
-          normalized[:azure_foundry_deployments] ||= normalized.delete(:deployments)
         end
 
         # Nested `credentials: { api_key:, bearer_token: }` is the canonical shape
@@ -119,8 +129,8 @@ module Legion
           normalized[:azure_foundry_bearer_token] ||= creds[:bearer_token]
         end
 
-        # Nested `provider: { api_version:, surface:, deployments: }` is the
-        # canonical shape from default_settings. Flat keys remain accepted.
+        # Nested `provider: { api_version:, surface: }` is the canonical shape
+        # from default_settings. Flat keys remain accepted.
         def self.resolve_nested_provider(normalized)
           prov = normalized.delete(:provider)
           return unless prov.is_a?(Hash)
@@ -128,13 +138,13 @@ module Legion
           prov = prov.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
           normalized[:azure_foundry_api_version] ||= prov[:api_version]
           normalized[:azure_foundry_surface] ||= prov[:surface]
-          normalized[:azure_foundry_deployments] ||= prov[:deployments]
         end
 
         private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
                              :normalize_instance_config, :resolve_nested_credentials, :resolve_nested_provider,
                              :extract_endpoint_from_cfg, :extract_tier_from_cfg,
-                             :promote_endpoint_aliases, :promote_provider_aliases
+                             :promote_endpoint_aliases, :promote_provider_aliases,
+                             :unresolved_credential?, :credential_string?
 
         Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
       end

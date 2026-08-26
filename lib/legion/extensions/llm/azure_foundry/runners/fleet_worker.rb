@@ -1,7 +1,6 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm/fleet/provider_responder'
-require 'legion/extensions/llm/inventory/registry'
 require 'legion/extensions/llm/azure_foundry'
 
 module Legion
@@ -21,12 +20,12 @@ module Legion
             module_function
 
             def handle_fleet_request(**opts)
+              # L6: the responder's dead provider_class/provider_instances
+              # params are gone from the 0.8.0 core — v3 dispatch is
+              # exact-only and never constructs a provider here.
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
                 payload: opts,
                 provider_family: AzureFoundry::PROVIDER_FAMILY,
-                provider_class: AzureFoundry::Provider,
-                provider_instances: -> { AzureFoundry.discover_instances },
-                registry: Legion::Extensions::Llm::Inventory::Registry,
                 delivery: opts[:delivery],
                 properties: opts[:properties]
               )

@@ -4,7 +4,7 @@ module Legion
   module Extensions
     module Llm
       module AzureFoundry
-        VERSION = '0.3.5'
+        VERSION = '0.4.2'
       end
     end
   end

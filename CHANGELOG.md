@@ -1,5 +1,125 @@
 # Changelog
 
+## [0.4.2] - 2026-08-25
+
+### Fixed
+- **Duplicate `provider_native_key` on discovery (collapsing distinct
+  deployments).** Model-id resolution used a multi-key fallback
+  (`id name model_name deployment_name model`) that could resolve two
+  DISTINCT deployments of one base model to the SAME id — the shared base
+  keys `model_name` / `model` ranked at or above the unique
+  `deployment_name`. Two drafts then carried the same `provider_native_key`
+  and the registry `Store#build_records` raised
+  `Legion::Extensions::Llm::Inventory::Errors::ValidationError:
+  duplicate provider_native_key`, so the instance failed to publish.
+  `MODEL_ID_KEYS` now resolves only the unique per-deployment identity
+  (`id deployment_name name`) and never the shared base model — one
+  unambiguous key per offering, matching the bedrock provider's single
+  `:model_id`. Envelope recognition (`looks_like_model?`) keeps its
+  original breadth via a separate `MODEL_SHAPE_KEYS` set, so a model-shaped
+  entry without a unique id is still recognized and then dropped by the
+  empty-id filter rather than raising an unrecognized-envelope error.
+
+## [0.4.1] - 2026-08-20
+
+### Changed
+- **0.8.0 conformance (lex-llm SSOT v4 contract cut).** Legacy type usage
+  is gone: the dispatch entries accept
+  `Legion::Extensions::Llm::Canonical::Message` only, and the shared
+  lex-llm `enforce_canonical_messages!` helper runs at every
+  message-operation entry on both entry forms (the provider entries and
+  the `AzureFoundryCallable` — 08 F2, 12/O05). The per-provider
+  `enforce_message_boundary!` re-implementation (which still accepted the
+  deleted legacy `Llm::Message` shape) is removed.
+- **Render from canonical, model untouched (08 R1/F3, B4).** `chat`/`stream`
+  build `Canonical::Params` from the canonical-spelling dispatch kwargs
+  (temperature lives only in `Canonical::Params`, 05 O4) and pass the
+  Selection-derived model String to the wire unchanged — the
+  `Model::Info` dispatch-time wrapping (and the callable's `to_model_info`
+  fabrication) is deleted.
+- **Offering read path is the Registry snapshot (07 C5).** The legacy
+  `offering_from_model` → `Routing::ModelOffering` production (with its
+  `CapabilityPolicy` cascade) is deleted; the discovery actor's writer
+  (`OfferingDraft` + `Registry` publication) is the sole offering path and
+  `discover_offerings` serves the activated inventory offerings.
+- **Legacy coordinator wiring removed.** The
+  `Inventory::ScopedRefresher::LegacyCoordinatorAdapter` compatibility
+  adapter is deleted from the discovery actor's `Inventory::Publisher`
+  construction (the file no longer exists in lex-llm 0.8.0).
+- **count_tokens returns the 05 §2 Integer heuristic.** The legacy Hash
+  artifact (`supported: false`, `estimated_input_characters`) is deleted
+  and the base heuristic estimate is inherited — operation support is
+  carried by the SSOT data plane (writer operation evidence +
+  `WorkerExecution.require_supported!`), not by a per-call artifact.
+- **§2 single publication engine (0.8.0 core contract).** The gem-level
+  `registry_publisher` singleton and the `Provider.registry_publisher`
+  class method are removed: nothing in the gem, the lex-llm core, or
+  legion-llm calls them (the discovery actor publishes through
+  `Inventory::Publisher`, the sole engine), and the 0.8.0
+  `RegistryPublisher` now carries the operator's `provider_instance`
+  identity — a gem-level construction site has no instance scope to
+  carry one.
+- **L6 fleet responder kwargs.** `FleetWorker.handle_fleet_request` no
+  longer passes the `provider_class:`/`provider_instances:` params the
+  0.8.0 core deleted from `ProviderResponder.call` (v3 dispatch is
+  exact-only and never constructs a provider at the runner).
+- **Dependency floor** — `lex-llm` raised to `>= 0.8.0` for the SSOT v4
+  contract cut (Canonical types, shared boundary helper, Registry read
+  path).
+
+### Added
+- **Dispatch-boundary regression coverage.** Loud-reject examples at each
+  public entry for plain-Hash input, and a canonical passthrough example
+  verifying canonical messages reach the rendered wire payload unchanged
+  and the sync response is a `Canonical::Response`.
+- **Raw-string-model passthrough spec.** The fleet model id travels to the
+  provider boundary verbatim for every operation (no Model::Info
+  fabrication, 08 F3/B4).
+
+## [0.4.0] - 2026-08-19
+
+### Changed
+- **Live model catalog discovery — standard lex-llm interface.**
+  `list_models` and `discover_offerings` now fetch the model catalog from
+  the instance's discovery endpoint (`GET models/info?api-version=...` on the
+  model-inference surface, `GET /models` on the OpenAI-compatible surface)
+  and derive offerings through the shared base-class flow — the same
+  endpoint-driven discovery every other provider uses. Offerings are
+  published with `publication_source: :provider_catalog`.
+- **Shared `ModelCatalogParser`.** Both the Provider's `list_models` and the
+  SSOT v3 `DiscoveryRefresh` actor parse the wire catalog through one module
+  (envelope: `data` / `models` / `value` / `deployments` list keys, bare
+  arrays, or a single model object). An unrecognized envelope raises instead
+  of producing a silent empty catalog.
+- **Discovery actor fetches the live catalog.** `discover_offerings_for_instance`
+  hits the same endpoint (and auth) as the readiness probe and builds one
+  OfferingDraft per catalog entry. A failed fetch yields nil so the refresh
+  loop keeps the last complete snapshot rather than deleting it.
+
+### Removed
+- **Configured deployments — the static discovery path is gone.**
+  `azure_foundry_deployments` (and the `deployments` / `provider.deployments`
+  settings aliases) no longer exist. `ProviderClassMethods#resolve_model_id`,
+  `#deployment_config`, `#normalize_deployments`, and the config-driven
+  offering path (`allowed_offerings` / `configured_deployments` /
+  `offering_from_config`) are deleted. The model set is whatever the endpoint
+  reports — nothing about models lives in settings.
+- `provider_native_key` and `model` are both the catalog model id (the
+  routable id the endpoint accepts); the base model name rides along as
+  `canonical_model_alias` when the catalog reports one.
+
+### Fixed
+- **Bearer-token auth on the actor path.** `apply_auth_headers` now sends
+  `Authorization: Bearer` when the instance carries a bearer token
+  (previously api-key only — bearer-only instances failed the readiness
+  probe and stayed `:initializing` forever).
+
+### Notes
+- No captured fixture of the model-inference `models/info` list envelope
+  exists in the monorepo. The parser accepts the known shapes; live
+  confirmation of the wire response against a real project is the one
+  remaining UAT item for this change.
+
 ## [0.3.5] - 2026-08-19
 
 ### Changed

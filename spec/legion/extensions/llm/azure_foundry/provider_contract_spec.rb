@@ -4,18 +4,23 @@ require 'spec_helper'
 require 'legion/extensions/llm/azure_foundry/provider'
 
 RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
-  it 'does not expose positional canonical provider arguments' do
-    canonical_methods.each { |method_name| expect_keyword_compatible(method_name) }
+  it 'exposes the 0.8.0 dispatch form: positional canonical messages, kwargs otherwise' do
+    canonical_methods.each { |method_name| expect_dispatch_shape(method_name) }
   end
 
-  def canonical_methods = %i[chat stream_chat embed image list_models discover_offerings health count_tokens]
+  # The 0.8.0 base funnel and the fleet callable contract take the canonical
+  # message array positionally (kit B1: chat(messages, model:, ...)); the gem's
+  # entries keep that one form and take everything else as keywords.
+  def canonical_methods = %i[chat stream embed count_tokens]
 
-  def expect_keyword_compatible(method_name)
-    return unless described_class.method_defined?(method_name)
-
+  def expect_dispatch_shape(method_name)
     params = described_class.instance_method(method_name).parameters
-    expect(params).not_to include(%i[req messages]), "#{method_name} still has positional messages"
-    expect(params).not_to include(%i[req text]), "#{method_name} still has positional text"
-    expect(params).not_to include(%i[req prompt]), "#{method_name} still has positional prompt"
+    positional = params.select { |pair| pair.is_a?(Array) && %i[req opt].include?(pair.first) }
+    expect(positional.map(&:last)).to eq(positional_messages(method_name)),
+                                      "#{method_name} positional args: #{params.inspect}"
+  end
+
+  def positional_messages(method_name)
+    %i[chat stream].include?(method_name) ? [:messages] : []
   end
 end
