@@ -1,180 +1,157 @@
 # lex-llm-azure-foundry
 
-LegionIO LLM provider extension for Azure AI Foundry Models and Azure OpenAI hosted deployments.
+Azure AI Foundry and Azure OpenAI provider adapter for LegionIO. Requests use the
+shared `lex-llm` canonical types, OpenAI-compatible wire translator, discovery
+pipeline, and inventory registry.
 
-This gem lives under `Legion::Extensions::Llm::AzureFoundry`. It depends on `lex-llm >= 0.4.3` for provider contracts, routing metadata, registry publishing helpers, and provider-owned fleet request handling. It does not require or depend on `legion-llm` at runtime; Legion LLM orchestration can load this provider gem and consume its discovery metadata.
-
-Load it with:
+## Install
 
 ```ruby
-require 'legion/extensions/llm/azure_foundry'
+gem 'lex-llm-azure-foundry'
 ```
 
-## What It Provides
+Ruby 3.4+ and `lex-llm >= 0.8.0` are required. LegionIO loads the extension and
+runs its discovery actor. The adapter implements chat, streamed chat, and text
+embeddings; a model is eligible only when its published evidence supports the
+requested operation and capabilities.
 
-- Provider family `:azure_foundry`
-- Azure AI Foundry model inference chat completions through `POST /models/chat/completions?api-version=...`
-- Azure AI Foundry model inference embeddings through `POST /models/embeddings?api-version=...`
-- Live model catalog discovery through the surface's discovery endpoint
-  (`GET /models/info?api-version=...` on the model-inference surface, `GET /models` on the
-  OpenAI-compatible surface) — the same endpoint doubles as the readiness probe
-- Azure OpenAI v1-compatible endpoint support through `/openai/v1/chat/completions` and `/openai/v1/embeddings`
-- Standard lex-llm offering discovery: `list_models` fetches the live catalog and
-  `discover_offerings` derives offerings through the shared base-class flow,
-  exactly like every other provider
-- Shared `ModelCatalogParser` — the single module both the Provider's `list_models`
-  and the SSOT v3 `DiscoveryRefresh` actor parse the wire catalog through
-- Shared OpenAI-compatible request and response mapping through `Legion::Extensions::Llm::Provider::OpenAICompatible`
-- Shared registry availability publishing through `Legion::Extensions::Llm::RegistryPublisher` when transport is available
-- Provider-owned fleet request handling through `Legion::Extensions::Llm::Fleet::ProviderResponder`
-
-## Architecture
+## One inventory owner
 
 ```text
-Legion::Extensions::Llm::AzureFoundry
-|-- Provider              # Azure AI Foundry and Azure OpenAI hosted provider surface
-|   |-- Capabilities      # Capability predicates inferred from catalog metadata and model naming
-|   `-- catalog discovery # live list_models through ModelCatalogParser
-|-- ModelCatalogParser    # shared live-catalog envelope/entry parsing
-|-- Actor::DiscoveryRefresh # SSOT v3 periodic discovery (catalog fetch, OfferingDrafts, probes)
-|-- Actor::FleetWorker    # Subscription actor for provider-owned fleet requests
-|-- Runners::FleetWorker  # Runner entrypoint that delegates to lex-llm ProviderResponder
-`-- VERSION
+Azure deployment API or model-inference /info
+                    |
+Azure discovery runner: parse identity and explicit evidence
+                    |
+lex-llm Discovery::Pipeline
+    claim -> readiness -> activate/replace -> Registry snapshot
+                                                |
+                                  router / fleet / discover_offerings
 ```
 
-`AzureFoundry.discover_instances` reads `extensions.llm.azure_foundry` settings and returns provider instance configs. The base Legion LLM runtime can use those configs to populate the provider registry and routing inventory; this gem does not write `legion-llm` registry state itself at require time.
+`AzureFoundry::Actor::Discovery` inherits the shared discovery actor.
+`AzureFoundry::Runners::Discovery` includes the shared pipeline and supplies only
+Azure protocol hooks and offering evidence. The shared pipeline owns instance
+reconciliation, probes, replacement, removal, weights, and health publication.
 
-## File Map
+`Provider#discover_offerings` reads activated lanes from that registry.
+It does not fetch Azure or maintain another catalog. Its inherited `live:`
+argument does not change that behavior.
 
-| Path | Purpose |
-|------|---------|
-| `lib/legion/extensions/llm/azure_foundry.rb` | Entry point, provider defaults, instance discovery, shared registry publisher |
-| `lib/legion/extensions/llm/azure_foundry/provider.rb` | Provider implementation with chat, stream, embed, health, readiness, and live model listing |
-| `lib/legion/extensions/llm/azure_foundry/model_catalog_parser.rb` | Shared live-catalog envelope and entry parsing |
-| `lib/legion/extensions/llm/azure_foundry/actors/discovery_refresh.rb` | SSOT v3 periodic discovery actor (catalog fetch, OfferingDrafts, readiness probes) |
-| `lib/legion/extensions/llm/azure_foundry/actors/fleet_worker.rb` | Subscription actor gated by ProviderResponder fleet settings |
-| `lib/legion/extensions/llm/azure_foundry/runners/fleet_worker.rb` | Fleet request runner that delegates execution to `ProviderResponder.call` |
-| `lib/legion/extensions/llm/azure_foundry/version.rb` | `VERSION` constant |
+## Model catalog versus deployment inventory
 
-## Configuration
+Azure resource `/openai/v1/models` responses describe models, which do not by
+themselves prove that matching deployments exist. Inference requests need the
+**deployment name**. Publishing a base model ID as a deployment can produce
+`DeploymentNotFound` even when catalog authentication succeeds.
 
-Configured instances can be supplied through Legion settings under `extensions.llm.azure_foundry`. A top-level endpoint creates a `:settings` instance; entries under `instances` create named instances.
+For OpenAI v1 resources, configure the Foundry project endpoint and its
+project-scoped bearer credential. Discovery reads
+`GET <project_endpoint>/deployments?api-version=v1` and publishes each deployment's
+`name`. The publisher-specific model name is metadata, not dispatch identity.
+A gateway catalog that explicitly supplies `deployment_name` can also be read;
+bare base-model entries are rejected.
 
-Models are **discovered from the endpoint**, not configured: nothing about the model set lives in settings. The discovery actor (and `list_models`) fetches the model catalog from the instance's discovery endpoint and publishes whatever it reports.
+Project discovery uses its own bearer credential with the
+`https://ai.azure.com/.default` scope. The resource API key and resource bearer
+token are never forwarded to the project endpoint. Credential retrieval and
+refresh remain owned by Legion settings and the configured credential source.
+
+Example settings under `extensions.llm.azure_foundry`:
 
 ```yaml
-extensions:
-  llm:
-    azure_foundry:
-      endpoint: https://example.services.ai.azure.com
-      api_key: env://AZURE_INFERENCE_CREDENTIAL
-      bearer_token: env://AZURE_FOUNDRY_BEARER_TOKEN
-      api_version: 2024-05-01-preview
+instances:
+  primary:
+    endpoint: https://resource.example.openai.azure.com
+    tier: cloud
+    credentials:
+      api_key: <resource-api-key>
+      project_bearer_token: <project-scoped-bearer-token>
+    provider:
+      surface: openai_v1
+      project_endpoint: https://resource.example.services.ai.azure.com/api/projects/primary
+      project_api_version: v1
+```
+
+The data-plane endpoint may already end in `/openai/v1`. The project endpoint
+is independently configured; the adapter does not guess a project or transform
+an account hostname into one.
+
+For an existing model-inference endpoint:
+
+```yaml
+instances:
+  serverless:
+    endpoint: https://resource.example.services.ai.azure.com/models
+    credentials:
+      api_key: <resource-api-key>
+    provider:
       surface: model_inference
-      instances:
-        prod:
-          endpoint: https://prod.services.ai.azure.com
-          api_key: env://AZURE_INFERENCE_CREDENTIAL
-          api_version: 2024-05-01-preview
-          surface: model_inference
-          fleet:
-            enabled: true
-            respond_to_requests: true
-            capabilities:
-              - chat
-              - stream_chat
-              - embed
+      api_version: 2024-05-01-preview
 ```
 
-The provider also supports direct configuration through `Legion::Extensions::Llm.configure` for tests and embedded use:
+The documented `/models/info` response identifies the deployed model through
+`model_name` and its operation through `model_type`. Discovery and inference
+share the same URL builder, so a configured `/models` suffix is not duplicated.
 
-```ruby
-Legion::Extensions::Llm.configure do |config|
-  config.azure_foundry_endpoint = ENV.fetch('AZURE_FOUNDRY_ENDPOINT')
-  config.azure_foundry_api_key = ENV['AZURE_INFERENCE_CREDENTIAL']
-  config.azure_foundry_bearer_token = ENV['AZURE_FOUNDRY_BEARER_TOKEN']
-  config.azure_foundry_api_version = '2024-05-01-preview'
-  config.azure_foundry_surface = :model_inference
-end
+A top-level endpoint still creates the `settings` instance. Nested credentials
+and provider settings are canonical; existing flat credential/provider aliases
+remain accepted. Disabled or credential-less instances are not claimed.
+
+## Evidence and failure behavior
+
+- Explicit catalog capability flags, including false values, become canonical
+  evidence. Names such as “embed” or “vision” do not establish capabilities.
+- Missing operation, tool, vision, thinking, or limit facts remain unknown.
+  Operator permissions and configured limits are not relabeled as provider facts.
+- Context and output limits come from valid positive integer catalog fields.
+  No model-size lookup table supplies missing limits.
+- Deployment names remain distinct even when several deployments share one base
+  model. Duplicate records with identical facts are collapsed; conflicting facts
+  fail the refresh.
+- All deployment pages must succeed before replacement. Pagination is bounded,
+  cycles are rejected, and continuation URLs must stay on the same project
+  deployment endpoint.
+- Failed or malformed refreshes retain the last good snapshot. A valid empty
+  deployment list can publish an empty snapshot.
+- Readiness performs a non-generation data-plane GET. It proves connectivity and
+  authentication, not that every base model is deployed.
+- The selected inventory model string reaches provider dispatch unchanged.
+  Fleet execution uses the shared `Fleet::ProviderResponder`.
+
+The inherited token counter returns an estimate; Azure has no portable native
+token-count endpoint, so authoritative native counting is not advertised.
+
+## Defaults
+
+All Azure connection and discovery defaults are defined in
+`lib/legion/extensions/llm/azure_foundry/settings.rb` and returned through the
+standard provider `default_settings` contract.
+
+| Setting under `extensions.llm.azure_foundry` | Default |
+| --- | --- |
+| `discovery.interval_seconds` | 3600 |
+| `discovery.request_timeout` / `open_timeout` | 10 / 5 seconds |
+| `discovery.health_timeout` / `health_open_timeout` | 5 / 3 seconds |
+| `discovery.max_pages` | 100 |
+| `instances.default.tier` | `cloud` |
+| `instances.default.provider.surface` | `model_inference` |
+| `instances.default.provider.api_version` | `2024-05-01-preview` |
+| `instances.default.provider.project_api_version` | `v1` |
+
+## Verification
+
+Run the full suite and linter:
+
+```sh
+bundle exec rspec --format json --out tmp/rspec_results.json --format progress --out tmp/rspec_progress.txt
+bundle exec rubocop -A
 ```
 
-Use `:openai_v1` when the endpoint should be treated as the OpenAI v1-compatible Azure route. The provider appends `/openai/v1` when the configured endpoint does not already include it.
+Specs exercise the shared SSOT conformance kit, real inventory publication,
+canonical callable payloads, documented model-info parsing, project pagination,
+authentication boundaries, failed-refresh retention, and explicit evidence.
 
-## Default Settings
-
-```ruby
-Legion::Extensions::Llm::AzureFoundry.default_settings
-# {
-#   enabled: true,
-#   provider_family: :azure_foundry,
-#   instances: {
-#     default: {
-#       endpoint: nil,
-#       tier: :frontier,
-#       transport: :http,
-#       credentials: {
-#         api_key: nil,
-#         bearer_token: nil
-#       },
-#       provider: {
-#         api_version: "2024-05-01-preview",
-#         surface: nil
-#       },
-#       usage: { inference: true, embedding: true, image: false },
-#       limits: { concurrency: 4 },
-#       fleet: {
-#         enabled: false,
-#         respond_to_requests: false,
-#         capabilities: [:chat, :stream_chat, :embed],
-#         lanes: [],
-#         concurrency: 4,
-#         queue_suffix: nil
-#       }
-#     }
-#   }
-# }
-```
-
-## Provider Methods
-
-```ruby
-provider = Legion::Extensions::Llm::AzureFoundry.provider_class.new(Legion::Extensions::Llm.config)
-
-provider.list_models
-provider.discover_offerings(live: true)
-provider.health(live: false)
-provider.readiness(live: false)
-provider.chat(messages: messages, model: 'gpt-4o-prod')
-provider.stream(messages: messages, model: 'gpt-4o-prod') { |chunk| puts chunk.content }
-provider.embed(text: ['hello'], model: 'embedding-prod')
-provider.count_tokens(messages: messages, model: 'gpt-4o-prod')
-```
-
-`list_models` and `discover_offerings(live: true)` fetch the model catalog from the instance's discovery endpoint. `discover_offerings(live: false)` returns the last cached discovery result without calling Azure — the periodic `DiscoveryRefresh` actor keeps that cache warm, exactly like the other providers.
-
-`health(live: true)` calls the surface's discovery endpoint (the non-billable readiness probe). Keep `live: false` for startup paths and tests that must not require Azure.
-
-`count_tokens` returns a structured unsupported result by default because the Microsoft REST contract used here does not define a portable token-counting endpoint across Azure AI Foundry deployments.
-
-## Fleet Responder
-
-Provider instances can opt in to consuming Legion LLM fleet requests. The actor is enabled only when at least one discovered instance has `fleet.respond_to_requests: true`.
-
-Fleet execution is delegated to `Legion::Extensions::Llm::Fleet::ProviderResponder` from `lex-llm`; this provider supplies the provider family, provider class, discovered instances, and delivery metadata.
-
-## Routing Metadata
-
-The catalog entry's model identity (`id` / `name` / `model_name` / `deployment_name` / `model`) becomes the offering `model` and `provider_native_key` — the same routable id the endpoint accepts. When the catalog reports a base model name distinct from the routable id, it rides along as `canonical_model_alias`; `model_family` is inferred from the model name as a routing hint (never as capability evidence).
-
-Supported `model_family` values are intentionally open-ended symbols, including:
-
-- `:openai`
-- `:mistral`
-- `:meta`
-- `:xai`
-- `:anthropic`
-- `:microsoft`
-
-## Failure Behavior
-
-Live discovery and health-check failures are reported with `handle_exception(e, level: :warn, handled: true, operation: ...)` before returning degraded metadata. A failed catalog fetch in the discovery actor keeps the last complete snapshot (it never replaces it with an empty set); provider configuration and fleet actor enablement do not require live Azure connectivity.
+Microsoft references:
+[model-inference info](https://learn.microsoft.com/en-us/rest/api/microsoftfoundry/model-inference/get-model-info/get-model-info?view=rest-microsoftfoundry-model-inference-2024-05-01-preview),
+[project deployments](https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/aiproject#deployments---list),
+[Azure endpoint and deployment naming](https://learn.microsoft.com/en-us/azure/ai-foundry/foundry-models/concepts/endpoints?view=foundry-classic).

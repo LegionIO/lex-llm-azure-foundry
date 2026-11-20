@@ -103,6 +103,32 @@ end
 # per-instance Provider (HTTP boundary) replaced by a recording double.
 # Identity and offering-draft construction delegate to the production runner
 # module's real helpers (no harness re-implementation that can drift).
+module AzureFoundryCatalogFixtures
+  CATALOGS = {
+    'eastus-prod' => [
+      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
+        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true,
+                            'function_calling' => true } }
+    ].freeze,
+    'westus-prod' => [
+      { 'id' => 'gpt-4o-mini-deployment', 'model_name' => 'gpt-4o-mini', 'context_window' => 128_000,
+        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true,
+                            'function_calling' => true } }
+    ].freeze,
+    'eastus-multi' => [
+      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
+        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true,
+                            'function_calling' => true } },
+      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small',
+        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
+    ].freeze,
+    'eastus-embed' => [
+      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small',
+        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
+    ].freeze
+  }.freeze
+end
+
 class AzureFoundrySsotHarness
   # `name` is the operator's CONFIG NAME — the instance_id the discovery actor
   # publishes (the key the router resolves instances.<name> settings by).
@@ -129,21 +155,6 @@ class AzureFoundrySsotHarness
   # production this comes from GET models/info (model_inference) or GET models
   # (openai_v1); the harness supplies the fixed entries the production draft
   # builder consumes — the same seam bedrock's harness uses for model summaries.
-  CATALOGS = {
-    'eastus-prod' => [
-      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000 }
-    ].freeze,
-    'westus-prod' => [
-      { 'id' => 'gpt-4o-mini-deployment', 'model_name' => 'gpt-4o-mini', 'context_window' => 128_000 }
-    ].freeze,
-    'eastus-multi' => [
-      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000 },
-      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small' }
-    ].freeze,
-    'eastus-embed' => [
-      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small' }
-    ].freeze
-  }.freeze
 
   def provider_family = :azure_foundry
   def instance_configs = INSTANCE_CONFIGS
@@ -183,7 +194,7 @@ class AzureFoundrySsotHarness
     end
   end
 
-  def catalog_entries(instance_config) = CATALOGS.fetch(instance_config[:name].to_s)
+  def catalog_entries(instance_config) = AzureFoundryCatalogFixtures::CATALOGS.fetch(instance_config[:name].to_s)
 
   def safe_readiness(instance_config:, **)
     Legion::Extensions::Llm::Inventory::ReadinessResult.new(
@@ -403,10 +414,12 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(offering.operation_evidence[:count_tokens].status).to eq(:unsupported)
     end
 
-    it 'uses :provider_implementation source for supported/unsupported operations' do
-      %i[chat stream_chat embed image transcribe translate speak moderate count_tokens].each do |op|
-        expect(offering.operation_evidence[op].source).to eq(:provider_implementation),
-                                                          "expected #{op} source to be :provider_implementation"
+    it 'distinguishes catalog capability facts from unimplemented provider operations' do
+      %i[chat stream_chat embed].each do |op|
+        expect(offering.operation_evidence[op].source).to eq(:provider_catalog)
+      end
+      %i[image transcribe translate speak moderate count_tokens].each do |op|
+        expect(offering.operation_evidence[op].source).to eq(:provider_implementation)
       end
     end
   end
@@ -426,7 +439,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
     it 'publishes chat as :unsupported so a plain chat request cannot misroute to the embedding deployment' do
       expect(embed_offering.operation_evidence[:chat].status).to eq(:unsupported)
-      expect(embed_offering.operation_evidence[:chat].source).to eq(:provider_implementation)
+      expect(embed_offering.operation_evidence[:chat].source).to eq(:provider_catalog)
     end
 
     it 'publishes stream_chat as :unsupported' do

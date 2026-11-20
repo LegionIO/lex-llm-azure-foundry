@@ -3,6 +3,8 @@
 require 'legion/json'
 require 'legion/logging'
 require 'legion/extensions/llm'
+require 'legion/extensions/llm/azure_foundry/settings'
+require 'legion/extensions/llm/azure_foundry/endpoint'
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 
 module Legion
@@ -41,7 +43,7 @@ module Legion
         module ProviderClassMethods
           def slug = 'azure_foundry'
           def default_transport = :http
-          def default_tier = :cloud
+          def default_tier = Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:tier]
           def configuration_requirements = %i[azure_foundry_endpoint]
           def capabilities = Capabilities
 
@@ -49,6 +51,7 @@ module Legion
             %i[
               azure_foundry_endpoint azure_foundry_api_key azure_foundry_bearer_token
               azure_foundry_api_version azure_foundry_surface
+              azure_foundry_project_endpoint azure_foundry_project_api_version azure_foundry_project_bearer_token
             ]
           end
         end
@@ -107,18 +110,13 @@ module Legion
           extend ProviderClassMethods
           include ProviderDispatchMethods
 
-          DEFAULT_API_VERSION = '2024-05-01-preview'
           MODEL_INFERENCE_SURFACE = :model_inference
           OPENAI_V1_SURFACE = :openai_v1
 
           def stream_usage_supported? = true
 
           def api_base
-            endpoint = config.azure_foundry_endpoint.to_s.sub(%r{/*\z}, '')
-            return "#{endpoint}/openai/v1" if surface == OPENAI_V1_SURFACE && !endpoint.end_with?('/openai/v1')
-            return endpoint.delete_suffix('/models') if surface == MODEL_INFERENCE_SURFACE
-
-            endpoint
+            azure_endpoint.base_url
           end
 
           def headers
@@ -129,7 +127,7 @@ module Legion
           def completion_url = path_for('chat/completions')
           def chat_url = completion_url
           def stream_url = completion_url
-          def models_url = surface == MODEL_INFERENCE_SURFACE ? path_for('info') : path_for('models')
+          def models_url = azure_endpoint.catalog_path
           def embedding_url(**) = path_for('embeddings')
           def health_url = models_url
 
@@ -157,7 +155,9 @@ module Legion
 
           private
 
-          def surface = (config.azure_foundry_surface || MODEL_INFERENCE_SURFACE).to_sym
+          def surface
+            (config.azure_foundry_surface || Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider][:surface]).to_sym
+          end
 
           def health_baseline(live)
             ready = configured?
@@ -176,12 +176,16 @@ module Legion
             )
           end
 
-          def api_version = config.azure_foundry_api_version || DEFAULT_API_VERSION
+          def azure_endpoint
+            Legion::Extensions::Llm::AzureFoundry::Endpoint.new(
+              endpoint: config.azure_foundry_endpoint,
+              surface: surface,
+              api_version: config.azure_foundry_api_version || Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider][:api_version]
+            )
+          end
 
           def path_for(path)
-            prefix = surface == MODEL_INFERENCE_SURFACE ? 'models/' : ''
-            suffix = surface == MODEL_INFERENCE_SURFACE ? "?api-version=#{api_version}" : ''
-            "#{prefix}#{path}#{suffix}"
+            azure_endpoint.path(operation: path)
           end
 
           def bearer_header

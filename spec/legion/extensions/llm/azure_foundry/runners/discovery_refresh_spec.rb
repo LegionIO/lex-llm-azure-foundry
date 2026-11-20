@@ -34,8 +34,10 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   end
   let(:catalog) do
     [
-      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000 },
-      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small' }
+      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
+        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true } },
+      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small',
+        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
     ]
   end
   let(:ready) do
@@ -51,7 +53,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   # CredentialSources, and the D14 health write-back reads
   # settings[:instances][<name>] — both resolve to this hash.
   def configure_settings(instances)
-    Legion::Settings[:extensions][:llm] = { azure_foundry: { instances: instances } }
+    defaults = Legion::Extensions::Llm::AzureFoundry.default_settings
+    Legion::Settings[:extensions][:llm] = { azure_foundry: defaults.merge(instances: instances) }
     allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(settings_tree)
   end
 
@@ -134,9 +137,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     let(:catalog) do
       [
         { 'deployment_name' => 'gpt-4o-blue', 'model_name' => 'gpt-4o', 'model' => 'gpt-4o',
-          'context_window' => 128_000 },
+          'context_window' => 128_000, 'model_type' => 'chat-completion' },
         { 'deployment_name' => 'gpt-4o-green', 'model_name' => 'gpt-4o', 'model' => 'gpt-4o',
-          'context_window' => 128_000 }
+          'context_window' => 128_000, 'model_type' => 'chat-completion' }
       ]
     end
 

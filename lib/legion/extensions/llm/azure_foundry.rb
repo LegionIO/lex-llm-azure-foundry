@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/extensions/llm/azure_foundry/settings'
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
@@ -16,24 +17,14 @@ module Legion
         extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :azure_foundry
-
-        INSTANCE_DEFAULTS = {
-          endpoint: nil,
-          tier: :frontier,
-          transport: :http,
-          credentials: { api_key: nil, bearer_token: nil },
-          provider: { api_version: Provider::DEFAULT_API_VERSION, surface: nil },
-          usage: { inference: true, embedding: true, image: false },
-          limits: { concurrency: 4 },
-          fleet: { enabled: false, respond_to_requests: false,
-                   capabilities: %i[chat stream_chat embed tools] }
-        }.freeze
+        PROVIDER_KEYS = %i[api_version surface project_endpoint project_api_version].freeze
+        CREDENTIAL_KEYS = %i[api_key bearer_token project_bearer_token].freeze
 
         def self.default_settings
           ::Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
-            discovery: { interval_seconds: 3600 },
-            instance: INSTANCE_DEFAULTS
+            discovery: Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:discovery],
+            instance: Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance]
           )
         end
 
@@ -94,7 +85,8 @@ module Legion
           resolve_nested_provider(normalized)
           promote_endpoint_aliases(normalized)
           promote_provider_aliases(normalized)
-          normalized.compact.except(:instances)
+          defaults = Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider]
+          defaults.transform_keys { |key| :"azure_foundry_#{key}" }.merge(normalized.compact.except(:instances))
         end
 
         def self.extract_endpoint_from_cfg(cfg)
@@ -102,7 +94,9 @@ module Legion
             cfg[:api_base] || cfg['api_base']
         end
 
-        def self.extract_tier_from_cfg(cfg) = cfg[:tier] || cfg['tier'] || :cloud
+        def self.extract_tier_from_cfg(cfg)
+          cfg[:tier] || cfg['tier'] || Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:tier]
+        end
 
         def self.promote_endpoint_aliases(normalized)
           normalized[:azure_foundry_endpoint] ||= normalized.delete(:endpoint)
@@ -111,10 +105,9 @@ module Legion
         end
 
         def self.promote_provider_aliases(normalized)
-          normalized[:azure_foundry_api_key] ||= normalized.delete(:api_key)
-          normalized[:azure_foundry_bearer_token] ||= normalized.delete(:bearer_token)
-          normalized[:azure_foundry_api_version] ||= normalized.delete(:api_version)
-          normalized[:azure_foundry_surface] ||= normalized.delete(:surface)
+          (PROVIDER_KEYS + CREDENTIAL_KEYS).each do |key|
+            normalized[:"azure_foundry_#{key}"] ||= normalized.delete(key)
+          end
         end
 
         # Nested `credentials: { api_key:, bearer_token: }` is the canonical shape
@@ -127,6 +120,7 @@ module Legion
           creds = creds.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
           normalized[:azure_foundry_api_key] ||= creds[:api_key]
           normalized[:azure_foundry_bearer_token] ||= creds[:bearer_token]
+          normalized[:azure_foundry_project_bearer_token] ||= creds[:project_bearer_token]
         end
 
         # Nested `provider: { api_version:, surface: }` is the canonical shape
@@ -136,8 +130,7 @@ module Legion
           return unless prov.is_a?(Hash)
 
           prov = prov.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
-          normalized[:azure_foundry_api_version] ||= prov[:api_version]
-          normalized[:azure_foundry_surface] ||= prov[:surface]
+          PROVIDER_KEYS.each { |key| normalized[:"azure_foundry_#{key}"] ||= prov[key] }
         end
 
         private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,

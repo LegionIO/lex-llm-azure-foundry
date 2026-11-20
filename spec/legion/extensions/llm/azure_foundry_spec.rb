@@ -305,8 +305,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   def default_catalog_entries
     [
       { 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
-        'max_output_tokens' => 16_384 },
-      { 'id' => 'embedding-prod', 'model_name' => 'text-embedding-3-small' }
+        'max_output_tokens' => 16_384,
+        'capabilities' => { 'chat_completion' => true, 'embeddings' => false,
+                            'streaming' => true, 'function_calling' => true } },
+      { 'id' => 'embedding-prod', 'model_name' => 'text-embedding-3-small',
+        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
     ]
   end
 
@@ -330,7 +333,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       provider_family: :azure_foundry,
       endpoint: nil,
       api_version: '2024-05-01-preview',
-      surface: nil,
+      surface: :model_inference,
       fleet: hash_including(enabled: false, respond_to_requests: false, capabilities: %i[chat stream_chat embed tools]),
       usage: hash_including(inference: true, embedding: true)
     }

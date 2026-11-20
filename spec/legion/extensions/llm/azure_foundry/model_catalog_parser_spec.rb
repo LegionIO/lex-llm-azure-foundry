@@ -8,32 +8,57 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser do
   describe '.model_entries' do
     it 'accepts a bare array body' do
       body = [{ 'id' => 'a' }, { 'id' => 'b' }]
-      expect(parser.model_entries(body)).to eq([{ 'id' => 'a' }, { 'id' => 'b' }])
+      expect(parser.model_entries(body: body)).to eq([{ 'id' => 'a' }, { 'id' => 'b' }])
     end
 
     %w[data models value models_list deployments].each do |list_key|
       it "accepts a #{list_key} list envelope (symbol and string keys)" do
-        expect(parser.model_entries(list_key => [{ 'id' => 'a' }])).to eq([{ 'id' => 'a' }])
-        expect(parser.model_entries(list_key.to_sym => [{ 'id' => 'a' }])).to eq([{ 'id' => 'a' }])
+        expect(parser.model_entries(body: { list_key => [{ 'id' => 'a' }] })).to eq([{ 'id' => 'a' }])
+        expect(parser.model_entries(body: { list_key.to_sym => [{ 'id' => 'a' }] })).to eq([{ 'id' => 'a' }])
       end
     end
 
     it 'accepts a single model object (no list key) as a one-element catalog' do
       body = { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o' }
-      expect(parser.model_entries(body)).to eq([body])
+      expect(parser.model_entries(body: body)).to eq([body])
     end
 
-    it 'drops non-hash entries from a list' do
-      expect(parser.model_entries('data' => ['not-a-hash', { 'id' => 'a' }])).to eq([{ 'id' => 'a' }])
+    it 'rejects malformed entries instead of publishing a partial or empty catalog' do
+      expect { parser.model_entries(body: { 'data' => ['not-a-hash', { 'id' => 'a' }] }) }
+        .to raise_error(described_class::InvalidCatalog, /array of model records/)
+    end
+
+    it 'distinguishes an empty catalog from a malformed list field' do
+      expect(parser.model_entries(body: { data: [] })).to eq([])
+      expect { parser.model_entries(body: { data: nil }) }
+        .to raise_error(described_class::InvalidCatalog, /array of model records/)
+    end
+
+    # Regression: the Azure-served OpenAI catalog reports some model ids
+    # more than once (duplicates differ only in created_at); a repeat of the
+    # resolved id would surface as a duplicate provider_native_key and the
+    # registry build_records raises ValidationError on it.
+    it 'collapses repeated model ids to the first occurrence' do
+      first  = { 'id' => 'gpt-4o', 'created_at' => 1 }
+      second = { 'id' => 'gpt-4o', 'created_at' => 2 }
+      expect(parser.model_entries(body: { 'data' => [first, { 'id' => 'other' }, second] }))
+        .to eq([first, { 'id' => 'other' }])
+    end
+
+    it 'does not collapse distinct entries lacking a resolvable id' do
+      entries = [{ 'model_name' => 'base' }, { 'model_name' => 'base' }]
+      expect(parser.model_entries(body: entries)).to eq(entries)
     end
 
     it 'raises on an unrecognized envelope rather than returning an empty catalog' do
-      expect { parser.model_entries({ 'unexpected' => 1 }) }
-        .to raise_error(ArgumentError, /unrecognized Azure Foundry catalog envelope/)
+      expect { parser.model_entries(body: { 'unexpected' => 1 }) }
+        .to raise_error(described_class::InvalidCatalog, /unrecognized Azure Foundry catalog envelope/)
     end
 
     it 'raises on scalar bodies' do
-      expect { parser.model_entries('not json') }.to raise_error(ArgumentError, /must be a Hash or Array/)
+      expect do
+        parser.model_entries(body: 'not json')
+      end.to raise_error(described_class::InvalidCatalog, /must be a Hash or Array/)
     end
   end
 
@@ -97,6 +122,12 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser do
 
     it 'returns nil when absent' do
       expect(parser.context_window_for('id' => 'a')).to be_nil
+    end
+
+    it 'rejects malformed or non-positive numeric evidence' do
+      ['128k', '128junk', -1, 0, 12.5].each do |value|
+        expect(parser.context_window_for(context_window: value)).to be_nil
+      end
     end
   end
 

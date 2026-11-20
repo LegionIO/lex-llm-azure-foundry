@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.3] - 2026-11-20
+
+### Fixed
+- Keep the shared `lex-llm` discovery lifecycle and registry as the sole inventory owner. Azure resource model catalogs no longer become deployed offerings merely because their catalog GET succeeds.
+- Discover deployed model names through the Foundry project deployment API, including bounded pagination, distinct project authentication, and retention of the last good snapshot after malformed or partial responses.
+- Accept the documented single-model `/models/info` response and share endpoint normalization between discovery and inference, including endpoints already ending in `/models`.
+- Publish explicit operation and capability evidence. Missing facts remain unknown; model-name guesses and operator limits no longer masquerade as provider evidence.
+- Preserve distinct deployments of a shared base model, deduplicate identical records, and reject contradictory duplicate records instead of silently choosing capabilities.
+
+### Changed
+- Provider connection and discovery defaults live in `azure_foundry/settings.rb`.
+- OpenAI-compatible resources exposing only a base-model catalog require `provider.project_endpoint` and `credentials.project_bearer_token` for deployment discovery. Data-plane credentials are not forwarded to the project API.
+- Updated provider documentation to describe registry snapshot reads and the actual discovery actor and runner.
+
 ## [0.4.2] - 2026-08-25
 
 ### Fixed

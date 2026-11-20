@@ -13,9 +13,8 @@ require 'legion/extensions/llm/azure_foundry/runners/discovery'
 # discovery runner's writer path, which carries the context window as
 # context_evidence (ValueEvidence). The value flows from the live model
 # catalog when the entry reports it (context_window / max_input_tokens /
-# context_length), else from the instance-level config (keys :context_window /
-# :max_input_tokens). When neither is present the window is simply unknown —
-# a per-instance gap, never a hardcoded guess.
+# context_length). Missing provider evidence remains unknown; an instance
+# permission cannot become a provider fact or a hardcoded guess.
 RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' do
   # The production writer seam: the discovery runner's own draft builder with
   # harness-supplied catalog entries (no network involved).
@@ -68,12 +67,12 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
   end
 
   context 'when the catalog entry reports no context info' do
-    it 'falls back to the instance-level context_window config' do
+    it 'does not promote an instance permission to authoritative context evidence' do
       draft = draft_for_model('private-mystery-model', [{ 'id' => 'private-mystery-model' }],
                               instance_cfg: { context_window: 64_000 })
 
-      expect(draft.context_evidence.status).to eq(:known)
-      expect(draft.context_evidence.value).to eq(64_000)
+      expect(draft.context_evidence.status).to eq(:unknown)
+      expect(draft.context_evidence.value).to be_nil
     end
 
     it 'leaves the context window unknown rather than guessing from a hardcoded table' do
