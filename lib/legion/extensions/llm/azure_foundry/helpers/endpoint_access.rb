@@ -47,6 +47,30 @@ module Legion
 
             private
 
+            def authenticated_catalog(instance_cfg:)
+              response = catalog_response(instance_cfg: instance_cfg)
+              unless response.status == 200
+                raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure,
+                      "catalog fetch returned HTTP #{response.status}"
+              end
+              catalog_body(response)
+            end
+
+            def catalog_response(instance_cfg:, health: false)
+              limits = settings[:discovery]
+              conn = build_connection(
+                base_url: catalog_base_url(instance_cfg: instance_cfg), instance_cfg: instance_cfg,
+                timeout: limits[health ? :health_timeout : :request_timeout],
+                open_timeout: limits[health ? :health_open_timeout : :open_timeout]
+              )
+              conn.get(catalog_path(instance_cfg: instance_cfg))
+            end
+
+            def catalog_body(response)
+              body = response.body
+              body.is_a?(String) ? Legion::JSON.load(body) : body
+            end
+
             # Configured binding changes must reclaim the callable. Rotating
             # broker lease contents are deliberately absent from this identity.
             def binding_fingerprint(instance_cfg:)

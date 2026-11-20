@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.6] - 2026-11-20
+
+### Fixed
+- Replace unsupported project API-key discovery with explicit `model_info`, `project`, or `declared` discovery sources. Project discovery requires Entra bearer/broker authentication; there is no runtime fallback between sources.
+- Support API-key access through declared deployment identity bindings joined to exact authenticated resource model-catalog records. Publish only declared names through the shared inventory with `declared: true` metadata and `provider_static_catalog` provenance; reject missing/conflicting model records, duplicate names, and capability/limit overrides.
+- Preserve normal snapshot replacement, withdrawal, callable retirement, and last-good retention after failed observations. Readiness remains a non-inference catalog GET.
+- Withdraw an explicitly empty declaration set without fetching remote model facts, even during a catalog outage. Keep startup and cadence readiness checks unchanged.
+- Validate all catalog record identities, but check duplicate/conflicting records only for declared base-model IDs so unrelated catalog duplicates cannot block the selected deployments.
+- Add one immutable vendor metadata owner for exact GPT-4o-mini 2024-07-18 GlobalStandard and GPT-4.1 2025-04-14 GlobalStandard facts. Live catalog facts take precedence, including false capabilities; unknown tuples remain unknown.
+- Normalize observed project model version, SKU, and capability limit fields at the project parser boundary. Both project and declared sources select the same vendor metadata using one explicit tuple, while declared identity remains distinct from observed revision evidence.
+- Require `lex-llm >= 0.8.10` for shared OpenAI-compatible streaming finish-reason preservation; Azure adds no separate completion handling.
+
 ## [0.4.5] - 2026-11-20
 
 ### Fixed

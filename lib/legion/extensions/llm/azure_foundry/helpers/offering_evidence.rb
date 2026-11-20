@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
+require 'legion/extensions/llm/azure_foundry/provider'
 
 module Legion
   module Extensions
@@ -19,39 +20,32 @@ module Legion
 
             private
 
-            def build_context_evidence(entry:, **)
-              value = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.context_window_for(entry: entry)
-              value_evidence(value)
-            end
-
-            def build_max_output_evidence(entry:, **)
-              value = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.positive_integer(
-                value: entry[:max_output_tokens]
-              )
-              value_evidence(value)
-            end
-
-            def build_offering_metadata(base_name:, instance_key:, publisher:)
-              {
-                canonical_model_alias: base_name,
-                model_publisher: publisher,
-                instance_id: instance_key.instance_id,
-                physical_id: instance_key.physical_id
-              }.compact.freeze
-            end
+            def build_context_evidence(entry:, **) = limit_evidence(entry: entry, key: :context_window)
+            def build_max_output_evidence(entry:, **) = limit_evidence(entry: entry, key: :max_output_tokens)
 
             def build_operation_evidence(entry:)
               evidence = %i[image transcribe translate speak moderate count_tokens].to_h do |operation|
                 [operation, operation_evidence(operation, :unsupported, :provider_implementation)]
               end
               OPERATION_KEYS.each do |operation, keys|
-                status = operation_status(entry, operation, keys)
-                evidence[operation] = operation_evidence(operation, status, evidence_source(status))
+                fact = operation_fact(entry: entry, operation: operation, keys: keys)
+                evidence[operation] = operation_evidence(operation, *fact)
               end
-              stream_status = evidence[:chat].status
-              stream_status = explicit_status(entry, [:streaming]) unless stream_status == :unsupported
-              evidence[:stream_chat] = operation_evidence(:stream_chat, stream_status, evidence_source(stream_status))
+              chat = evidence.fetch(:chat)
+              stream_fact = if chat.unsupported?
+                              [chat.status, chat.source]
+                            else
+                              capability_fact(entry: entry, capability: :streaming, keys: [:streaming])
+                            end
+              evidence[:stream_chat] = operation_evidence(:stream_chat, *stream_fact)
               evidence
+            end
+
+            def operation_fact(entry:, operation:, keys:)
+              status = operation_status(entry, operation, keys)
+              return [status, :provider_catalog] unless status == :unknown
+
+              metadata_capability_fact(entry: entry, capability: operation == :chat ? :completion : :embedding)
             end
 
             def operation_status(entry, operation, keys)
@@ -66,13 +60,17 @@ module Legion
             end
 
             def build_capability_evidence(entry:, operations:)
+              operation_map = { embedding: :embed, completion: :chat, streaming: :stream_chat }
               CAPABILITY_KEYS.to_h do |capability, keys|
-                status = explicit_status(entry, keys)
-                status = operations[:embed].status if capability == :embedding
-                status = operations[:chat].status if capability == :completion
-                status = operations[:stream_chat].status if capability == :streaming
+                operation = operation_map[capability]
+                status, source = if operation
+                                   fact = operations.fetch(operation)
+                                   [fact.status, fact.source]
+                                 else
+                                   capability_fact(entry: entry, capability: capability, keys: keys)
+                                 end
                 [capability, Legion::Extensions::Llm::Inventory::CapabilityEvidence.new(
-                  capability: capability, status: status, source: evidence_source(status)
+                  capability: capability, status: status, source: source
                 )]
               end
             end
@@ -95,13 +93,39 @@ module Legion
               )
             end
 
-            def evidence_source(status) = status == :unknown ? :absent : :provider_catalog
+            def capability_fact(entry:, capability:, keys:)
+              status = explicit_status(entry, keys)
+              return [status, :provider_catalog] unless status == :unknown
 
-            def value_evidence(value)
+              metadata_capability_fact(entry: entry, capability: capability)
+            end
+
+            def metadata_capability_fact(entry:, capability:)
+              value = model_metadata(entry: entry)&.dig(:capabilities, capability)
+              return %i[supported model_metadata] if value == true
+              return %i[unsupported model_metadata] if value == false
+
+              %i[unknown absent]
+            end
+
+            def limit_evidence(entry:, key:)
+              catalog_value = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.positive_integer(
+                value: entry[key]
+              )
+              return value_evidence(catalog_value) unless catalog_value.nil?
+
+              value_evidence(model_metadata(entry: entry)&.[](key), source: :model_metadata)
+            end
+
+            def model_metadata(entry:)
+              Legion::Extensions::Llm::AzureFoundry::Provider::MODEL_METADATA[entry[:model_metadata_key]]
+            end
+
+            def value_evidence(value, source: :provider_catalog)
               return absent_value_evidence if value.nil?
 
               Legion::Extensions::Llm::Inventory::ValueEvidence.new(status: :known, value: value,
-                                                                    source: :provider_catalog)
+                                                                    source: source)
             end
 
             def absent_value_evidence

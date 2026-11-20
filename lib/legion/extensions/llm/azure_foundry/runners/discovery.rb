@@ -2,6 +2,7 @@
 
 require 'legion/extensions/llm/discovery/pipeline'
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
+require 'legion/extensions/llm/azure_foundry/declared_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/helpers/offering_evidence'
 require 'legion/extensions/llm/azure_foundry/helpers/project_catalog'
 require 'legion/extensions/llm/azure_foundry/helpers/endpoint_access'
@@ -24,21 +25,20 @@ module Legion
             def provider_family = :azure_foundry
 
             def fetch_raw_models(instance_cfg:, **)
-              if credential_string?(instance_cfg[:azure_foundry_project_endpoint])
-                return fetch_project_deployments(instance_cfg: instance_cfg)
+              case instance_cfg.fetch(:azure_foundry_discovery_source)
+              when :project then fetch_project_deployments(instance_cfg: instance_cfg)
+              when :declared then fetch_declared_models(instance_cfg: instance_cfg)
+              when :model_info
+                unless surface_for(instance_cfg) == :model_inference
+                  raise Legion::Extensions::Llm::ConfigurationError,
+                        'OpenAI v1 requires an explicit project or declared discovery_source'
+                end
+                Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_info(
+                  body: authenticated_catalog(instance_cfg: instance_cfg)
+                )
+              else
+                raise Legion::Extensions::Llm::ConfigurationError, 'unsupported provider.discovery_source'
               end
-              if surface_for(instance_cfg) == :openai_v1
-                raise Legion::Extensions::Llm::ConfigurationError,
-                      'OpenAI v1 deployment discovery requires provider.project_endpoint'
-              end
-
-              response = catalog_response(instance_cfg: instance_cfg)
-              unless response.status == 200
-                raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure,
-                      "catalog fetch returned HTTP #{response.status}"
-              end
-
-              Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_info(body: catalog_body(response))
             rescue Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
                    Legion::JSON::ParseError => e
               raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, e.message, cause: e
@@ -74,6 +74,7 @@ module Legion
               tier = instance_cfg.fetch(:tier)
               operations = build_operation_evidence(entry: model_data)
               base_name = model_data[:model_name]
+              declared = instance_cfg[:azure_foundry_discovery_source] == :declared
               Legion::Extensions::Llm::Inventory::OfferingDraft.new(
                 provider_native_key: model_id, model: model_id, tier: tier,
                 operation_evidence: operations,
@@ -84,26 +85,40 @@ module Legion
                 model_revision_evidence: value_evidence(model_data[:model_revision]),
                 tokenizer_evidence: absent_value_evidence,
                 metadata: build_offering_metadata(base_name: base_name, instance_key: instance_key,
-                                                  publisher: model_data[:model_publisher]),
-                publication_source: :provider_catalog
+                                                  publisher: model_data[:model_publisher], declared: declared,
+                                                  model_data: model_data),
+                publication_source: declared ? :provider_static_catalog : :provider_catalog
               )
             end
 
             private
 
-            def catalog_response(instance_cfg:, health: false)
-              limits = settings[:discovery]
-              conn = build_connection(
-                base_url: catalog_base_url(instance_cfg: instance_cfg), instance_cfg: instance_cfg,
-                timeout: limits[health ? :health_timeout : :request_timeout],
-                open_timeout: limits[health ? :health_open_timeout : :open_timeout]
-              )
-              conn.get(catalog_path(instance_cfg: instance_cfg))
+            def build_offering_metadata(base_name:, instance_key:, publisher:, declared:, model_data:)
+              metadata = {
+                canonical_model_alias: base_name, model_publisher: publisher,
+                instance_id: instance_key.instance_id, physical_id: instance_key.physical_id
+              }
+              if declared
+                metadata.merge!(declared: true, declared_model_version: model_data[:declared_model_version],
+                                declared_deployment_type: model_data[:declared_deployment_type])
+              end
+              metadata.compact.freeze
             end
 
-            def catalog_body(response)
-              body = response.body
-              body.is_a?(String) ? Legion::JSON.load(body) : body
+            def fetch_declared_models(instance_cfg:)
+              unless surface_for(instance_cfg) == :openai_v1
+                raise Legion::Extensions::Llm::ConfigurationError,
+                      'declared discovery_source requires openai_v1 surface'
+              end
+
+              bindings = Legion::Extensions::Llm::AzureFoundry::DeclaredCatalogParser.bindings(
+                value: instance_cfg[:azure_foundry_deployments]
+              )
+              return [] if bindings.empty?
+
+              Legion::Extensions::Llm::AzureFoundry::DeclaredCatalogParser.parse(
+                body: authenticated_catalog(instance_cfg: instance_cfg), declarations: bindings
+              )
             end
           end
         end

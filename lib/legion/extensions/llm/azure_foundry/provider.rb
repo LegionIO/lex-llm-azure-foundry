@@ -14,6 +14,20 @@ module Legion
         class Provider < Legion::Extensions::Llm::Provider
           include Legion::Extensions::Llm::Provider::OpenAICompatible
 
+          # Immutable vendor facts, keyed by exact model/version/deployment type.
+          # Standard/regional and provisioned limits must not be inferred from
+          # the GlobalStandard tuples. See README's vendor metadata references.
+          MODEL_METADATA = {
+            %w[gpt-4o-mini 2024-07-18 GlobalStandard].freeze => {
+              context_window: 128_000, max_output_tokens: 16_384,
+              capabilities: { completion: true, streaming: true, tools: true, vision: true }.freeze
+            }.freeze,
+            %w[gpt-4.1 2025-04-14 GlobalStandard].freeze => {
+              context_window: 1_047_576, max_output_tokens: 32_768,
+              capabilities: { completion: true, streaming: true, tools: true, vision: true }.freeze
+            }.freeze
+          }.freeze
+
           def self.slug = 'azure_foundry'
           def self.default_transport = :http
           def self.default_tier = Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:tier]
@@ -23,8 +37,9 @@ module Legion
             %i[
               azure_foundry_endpoint azure_foundry_api_key azure_foundry_bearer_token
               azure_foundry_api_version azure_foundry_surface azure_foundry_project_endpoint
-              azure_foundry_project_api_version azure_foundry_project_api_key azure_foundry_project_bearer_token
+              azure_foundry_project_api_version azure_foundry_project_bearer_token
               azure_foundry_broker azure_foundry_project_broker azure_foundry_project_connection_name
+              azure_foundry_discovery_source azure_foundry_deployments
             ]
           end
 

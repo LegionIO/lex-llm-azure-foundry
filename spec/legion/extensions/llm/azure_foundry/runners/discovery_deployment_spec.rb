@@ -12,7 +12,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   end
   let(:config) do
     { tier: :cloud, azure_foundry_endpoint: 'https://resource.example/models', azure_foundry_surface: :model_inference,
-      azure_foundry_api_version: '2024-05-01-preview' }
+      azure_foundry_api_version: '2024-05-01-preview', azure_foundry_discovery_source: :model_info }
   end
 
   before do
@@ -52,7 +52,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     cfg = config.merge(azure_foundry_surface: :openai_v1)
 
     expect { runner.fetch_raw_models(instance_cfg: cfg) }
-      .to raise_error(Legion::Extensions::Llm::ConfigurationError, /project_endpoint/)
+      .to raise_error(Legion::Extensions::Llm::ConfigurationError, /discovery_source/)
   end
 
   it 'honors explicit negative operation evidence even when the name looks like an embedding model' do

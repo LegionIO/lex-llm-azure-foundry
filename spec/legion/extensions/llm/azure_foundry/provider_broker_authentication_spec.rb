@@ -95,6 +95,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
     register_token(token: 'project-one', qualifier: :'azure-project')
     cfg = provider_config.except(:azure_foundry_broker).merge(
       azure_foundry_api_key: 'resource-key',
+      azure_foundry_discovery_source: :project,
       azure_foundry_project_endpoint: 'https://project.example/api/projects/p',
       azure_foundry_project_api_version: 'v1',
       azure_foundry_project_broker: { provider: 'entra_delegated', qualifier: 'azure-project' }

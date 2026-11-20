@@ -14,13 +14,15 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     {
       endpoint: 'https://resource.example', tier: :cloud,
       credentials: { api_key: 'data-plane-key', project_bearer_token: 'project-token' },
-      provider: { surface: :openai_v1, project_endpoint: project_url }
+      provider: { surface: :openai_v1, discovery_source: :project, project_endpoint: project_url }
     }
   end
   let(:deployment) do
     {
       name: 'production-chat', type: 'ModelDeployment', modelName: 'base-model', modelVersion: '2026-01',
-      capabilities: { chat_completion: true, embeddings: false, function_calling: true, streaming: true }
+      modelPublisher: 'Example', sku: { name: 'GlobalStandard', capacity: 1, family: '', size: '', tier: 'Standard' },
+      capabilities: { chat_completion: 'true', embeddings: 'false', function_calling: 'true', streaming: 'true',
+                      maxContextToken: '128000', maxOutputToken: '16384' }
     }
   end
 
@@ -75,11 +77,79 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       .to contain_exactly('production-chat', 'secondary-chat')
     expect(lanes.map { |lane| lane.metadata[:canonical_model_alias] }).to all(eq('base-model'))
     expect(lanes.map { |lane| lane.model_revision_evidence.value }).to all(eq('2026-01'))
+    expect(lanes.map { |lane| lane.model_revision_evidence.source }).to all(eq(:provider_catalog))
+    expect(lanes.map { |lane| lane.context_evidence.value }).to all(eq(128_000))
+    expect(lanes.map { |lane| lane.max_output_evidence.value }).to all(eq(16_384))
+    expect(lanes.map { |lane| lane.context_evidence.source }).to all(eq(:provider_catalog))
+    expect(lanes.map { |lane| lane.metadata.key?(:declared) }).to all(be(false))
     provider = runner.states.fetch('primary')[:callable]
     expect(provider).to be_an_instance_of(Legion::Extensions::Llm::AzureFoundry::Provider)
     expect(provider.provider_instance_id).to eq(:primary)
     expect(provider.discover_offerings.map(&:lane_id)).to match_array(lanes.map(&:lane_id))
     stubs.verify_stubbed_calls
+  end
+
+  context 'with observed model version and SKU metadata' do
+    let(:deployment) do
+      {
+        name: 'observed-chat', type: 'ModelDeployment', modelName: 'gpt-4.1', modelVersion: '2025-04-14',
+        modelPublisher: 'OpenAI', sku: { name: 'GlobalStandard', capacity: 1, family: '', size: '', tier: 'Standard' },
+        capabilities: { chat_completion: 'true', function_calling: 'false', streaming: 'false' }
+      }
+    end
+
+    before do
+      stubs.get(deployment_url) { response(value: [deployment]) }
+      stubs.get(resource_url) { response(data: []) }
+    end
+
+    it 'uses the shared vendor metadata owner with an observed tuple and preserves observation provenance' do
+      runner.refresh
+
+      draft = runner.states.fetch('primary')[:offerings].first
+      expect(draft.context_evidence.to_h).to include(status: :known, value: 1_047_576, source: :model_metadata)
+      expect(draft.max_output_evidence.to_h).to include(status: :known, value: 32_768, source: :model_metadata)
+      expect(draft.model_revision_evidence.to_h).to include(value: '2025-04-14', source: :provider_catalog)
+      expect(draft.capability_evidence[:vision].to_h).to include(status: :supported, source: :model_metadata)
+      expect(draft.capability_evidence[:tools].to_h).to include(status: :unsupported, source: :provider_catalog)
+      expect(draft.operation_evidence[:stream_chat].to_h).to include(status: :unsupported, source: :provider_catalog)
+      expect(draft.publication_source).to eq(:provider_catalog)
+      expect(draft.metadata).not_to have_key(:declared_model_version)
+      expect(draft.metadata).not_to have_key(:declared)
+    end
+
+    it 'prefers native capability limit fields over vendor metadata' do
+      deployment[:capabilities].merge!(maxContextToken: '64000', maxOutputToken: '4096')
+
+      runner.refresh
+
+      draft = runner.states.fetch('primary')[:offerings].first
+      expect(draft.context_evidence.to_h).to include(value: 64_000, source: :provider_catalog)
+      expect(draft.max_output_evidence.to_h).to include(value: 4096, source: :provider_catalog)
+    end
+
+    it 'does not use synthetic top-level limits or malformed native limits as provider facts' do
+      deployment[:modelVersion] = 'unknown-version'
+      deployment.merge!(context_window: 999_999, max_output_tokens: 999_999)
+      deployment[:capabilities].merge!(maxContextToken: '128k', maxOutputToken: '-1')
+
+      runner.refresh
+
+      draft = runner.states.fetch('primary')[:offerings].first
+      expect(draft.context_evidence.status).to eq(:unknown)
+      expect(draft.max_output_evidence.status).to eq(:unknown)
+    end
+
+    it 'keeps unknown observed SKUs unknown instead of borrowing GlobalStandard limits' do
+      deployment[:sku][:name] = 'UnknownSku'
+
+      runner.refresh
+
+      draft = runner.states.fetch('primary')[:offerings].first
+      expect(draft.context_evidence.status).to eq(:unknown)
+      expect(draft.max_output_evidence.status).to eq(:unknown)
+      expect(draft.capability_evidence[:vision].status).to eq(:unknown)
+    end
   end
 
   it 'keeps the last good snapshot when a later page fails instead of publishing a partial catalog' do
@@ -98,6 +168,22 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
 
     expect(registry.snapshot.each_lane.map(&:lane_id)).to eq(previous)
     expect(runner.states.fetch('primary')[:sequence]).to eq(0)
+  end
+
+  [{ sku: { name: 42 } }, { capabilities: 'invalid' }].each do |invalid|
+    it "retains observed offerings after malformed project metadata #{invalid.inspect}" do
+      stubs.get(deployment_url) { response(value: [deployment]) }
+      stubs.get(resource_url) { response(data: []) }
+      runner.refresh
+      previous = registry.snapshot.each_lane.map(&:lane_id)
+      expect(previous).not_to be_empty
+
+      deployment.merge!(invalid)
+      runner.refresh
+
+      expect(registry.snapshot.each_lane.map(&:lane_id)).to eq(previous)
+      expect(runner.states.fetch('primary')[:sequence]).to eq(0)
+    end
   end
 
   it 'does not send a project bearer token to an off-origin nextLink' do
@@ -211,126 +297,10 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /connectionName/)
   end
 
-  context 'with an explicit project API key' do
-    before do
-      credentials = tree[:instances][:primary][:credentials]
-      credentials.delete(:project_bearer_token)
-      credentials[:project_api_key] = 'project-key'
-    end
+  it 'rejects unsupported project API-key configuration rather than treating it as project authentication' do
+    tree[:instances][:primary][:credentials][:project_api_key] = 'unsupported-key'
 
-    %i[api_key bearer_token].each do |resource_auth|
-      it "publishes connected deployments with isolated project-key and resource #{resource_auth} authentication" do
-        credentials = tree[:instances][:primary][:credentials]
-        credentials.delete(:api_key)
-        credentials[resource_auth] = 'resource-credential'
-        tree[:instances][:primary][:provider][:project_connection_name] = 'remote'
-        connected = deployment.merge(connectionName: 'remote')
-        stubs.get(deployment_url) do |env|
-          expect_project_key(env)
-          response(value: [connected], nextLink: "#{deployment_url}&skip=1")
-        end
-        stubs.get("#{deployment_url}&skip=1") do |env|
-          expect_project_key(env)
-          response(value: [connected.merge(name: 'secondary-chat')])
-        end
-        stubs.get("#{project_url}/connections/remote?api-version=v1") do |env|
-          expect_project_key(env)
-          response(name: 'remote', type: 'AzureOpenAI', target: 'https://resource.example')
-        end
-        stubs.get(resource_url) do |env|
-          expect_resource_credential(env, resource_auth: resource_auth)
-          response(data: [])
-        end
-
-        runner.refresh
-
-        expect(registry.snapshot.each_lane.map(&:model)).to contain_exactly('production-chat', 'secondary-chat')
-        provider = runner.states.fetch('primary')[:callable]
-        expect(provider).to be_an_instance_of(Legion::Extensions::Llm::AzureFoundry::Provider)
-        expect(provider.config.azure_foundry_project_api_key).to eq('project-key')
-        expect(provider.class.configuration_options).to include(:azure_foundry_project_api_key)
-        provider.connection.connection.adapter(:test, stubs)
-        stubs.post('https://resource.example/openai/v1/chat/completions') do |env|
-          expect_resource_credential(env, resource_auth: resource_auth)
-          response(model: 'production-chat',
-                   choices: [{ message: { role: 'assistant', content: 'ok' },
-                               finish_reason: 'stop' }])
-        end
-
-        result = provider.chat([Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'Hello')],
-                               model: 'production-chat')
-
-        expect(result.text).to eq('ok')
-        stubs.verify_stubbed_calls
-      end
-    end
-
-    {
-      project_bearer_token: 'project-token',
-      project_broker: { provider: :entra_delegated, qualifier: :foundry_project }
-    }.each do |other_source, value|
-      it "rejects an API key combined with #{other_source} before sending a request" do
-        tree[:instances][:primary][:credentials][other_source] = value
-
-        expect { runner.fetch_raw_models(instance_cfg: config) }
-          .to raise_error(Legion::Extensions::Llm::ConfigurationError, /exactly one/)
-      end
-    end
-
-    it 'rejects a malformed project key through the existing credential validator' do
-      tree[:instances][:primary][:credentials][:project_api_key] = 42
-
-      expect { runner.fetch_raw_models(instance_cfg: config) }
-        .to raise_error(Legion::Extensions::Llm::ConfigurationError, /credentials must be strings/)
-    end
-
-    it 'retains the last complete snapshot after a project network-policy rejection' do
-      denied = false
-      stubs.get(deployment_url) do |env|
-        expect_project_key(env)
-        if denied
-          response(status: 403, error: { code: '403', message: 'A Virtual Network is configured for this resource.' })
-        else
-          response(value: [deployment])
-        end
-      end
-      stubs.get(resource_url) { response(data: []) }
-      runner.refresh
-      previous = registry.snapshot.each_lane.map(&:lane_id)
-      expect(previous).not_to be_empty
-
-      denied = true
-      runner.refresh
-
-      expect(registry.snapshot.each_lane.map(&:lane_id)).to eq(previous)
-      expect(runner.states.fetch('primary')[:sequence]).to eq(0)
-      stubs.verify_stubbed_calls
-    end
-
-    it 'rejects off-origin pagination before forwarding the project key' do
-      stubs.get(deployment_url) do |env|
-        expect_project_key(env)
-        response(value: [deployment], nextLink: 'https://other.example/deployments')
-      end
-
-      expect { runner.fetch_raw_models(instance_cfg: config) }
-        .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /same project/)
-      stubs.verify_stubbed_calls
-    end
-
-    def expect_project_key(env)
-      expect(env.request_headers['api-key']).to eq('project-key')
-      expect(env.request_headers).not_to have_key('Authorization')
-    end
-
-    def expect_resource_credential(env, resource_auth:)
-      expected = if resource_auth == :api_key
-                   { 'api-key' => 'resource-credential' }
-                 else
-                   { 'Authorization' => 'Bearer resource-credential' }
-                 end
-      expect(env.request_headers.slice('api-key', 'Authorization')).to eq(expected)
-    end
+    expect { config }.to raise_error(Legion::Extensions::Llm::ConfigurationError, /project_api_key is unsupported/)
   end
 
   context 'with an explicitly configured connected resource' do
@@ -340,7 +310,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       {
         endpoint: 'https://connected.example', tier: :cloud,
         credentials: { api_key: 'connected-key', project_bearer_token: 'project-token' },
-        provider: { surface: :openai_v1, project_endpoint: project_url, project_connection_name: 'remote' }
+        provider: { surface: :openai_v1, discovery_source: :project,
+                    project_endpoint: project_url, project_connection_name: 'remote' }
       }
     end
     let(:connection_info) do
@@ -384,7 +355,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       tree[:instances][:native] = {
         endpoint: 'https://native.example',
         credentials: { api_key: 'native-key', project_bearer_token: 'project-token' },
-        provider: { surface: :openai_v1, project_endpoint: project_url }
+        provider: { surface: :openai_v1, discovery_source: :project, project_endpoint: project_url }
       }
       stubs.get(deployment_url) do
         response(value: [deployment, deployment.merge(connectionName: 'remote', modelName: 'remote-base')])

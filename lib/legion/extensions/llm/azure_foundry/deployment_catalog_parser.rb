@@ -29,8 +29,43 @@ module Legion
             end
             return unless source_connection(entry: entry) == connection_name
 
-            entry.merge(deployment_name: entry.fetch(:name), model_name: entry[:modelName],
-                        model_revision: entry[:modelVersion], model_publisher: entry[:modelPublisher])
+            entry.merge(observed_identity(entry: entry)).merge(observed_limits(entry: entry))
+          end
+
+          def observed_identity(entry:, **)
+            {
+              deployment_name: entry.fetch(:name), model_name: entry[:modelName],
+              model_revision: entry[:modelVersion], model_publisher: entry[:modelPublisher],
+              model_metadata_key: [entry[:modelName], entry[:modelVersion], sku_name(entry: entry)]
+            }
+          end
+
+          def sku_name(entry:, **)
+            sku = entry[:sku]
+            return nil if sku.nil?
+
+            name = sku[:name] if sku.is_a?(Hash)
+            return name if name.is_a?(String) && !name.empty?
+
+            raise Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
+                  'Azure deployment sku must contain a nonempty name'
+          end
+
+          def observed_limits(entry:, **)
+            capabilities = entry[:capabilities]
+            unless capabilities.nil? || capabilities.is_a?(Hash)
+              raise Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
+                    'Azure deployment capabilities must be an object'
+            end
+
+            {
+              context_window: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.positive_integer(
+                value: capabilities&.[](:maxContextToken)
+              ),
+              max_output_tokens: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.positive_integer(
+                value: capabilities&.[](:maxOutputToken)
+              )
+            }
           end
 
           def source_connection(entry:, **)
