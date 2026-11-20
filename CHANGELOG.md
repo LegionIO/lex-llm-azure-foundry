@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.7] - 2026-11-20
+
+### Fixed
+- Publish documented unsupported thinking evidence for the exact GPT-4o-mini 2024-07-18 GlobalStandard and GPT-4.1 2025-04-14 GlobalStandard tuples, using `model_metadata` provenance instead of leaving their thinking capability unknown.
+- Preserve explicit live catalog capability precedence, including positive thinking evidence. Other models, versions, and deployment types remain unknown unless their own evidence establishes support.
+
 ## [0.4.6] - 2026-11-20
 
 ### Fixed

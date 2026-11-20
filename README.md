@@ -170,16 +170,22 @@ inventory, or a model-name heuristic. Unknown versions or deployment types remai
 unknown. Both parser boundaries construct one explicit lookup tuple; declared
 identity fields remain declarations in metadata and never become observed revision evidence.
 
-| Exact model | Version | Deployment type | Context | Max output |
-| --- | --- | --- | --- | --- |
-| `gpt-4o-mini` | `2024-07-18` | `GlobalStandard` | 128,000 | 16,384 |
-| `gpt-4.1` | `2025-04-14` | `GlobalStandard` | 1,047,576 | 32,768 |
+| Exact model | Version | Deployment type | Context | Max output | Thinking |
+| --- | --- | --- | --- | --- | --- |
+| `gpt-4o-mini` | `2024-07-18` | `GlobalStandard` | 128,000 | 16,384 | Unsupported |
+| `gpt-4.1` | `2025-04-14` | `GlobalStandard` | 1,047,576 | 32,768 | Unsupported |
 
 The same exact tuples document chat, streaming, tools, and vision support.
 The GPT-4.1 GlobalStandard facts do not apply to regional Standard, provisioned,
 batch, or unknown SKUs. Sources: [Microsoft model capability tables](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/models-sold-directly-by-azure?pivots=azure-openai),
 [deployment types](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/deployment-types),
 and [Azure GPT-4.1 launch](https://azure.microsoft.com/en-us/blog/announcing-the-gpt-4-1-model-series-for-azure-ai-foundry-developers/).
+
+The two exact tuples publish unsupported thinking evidence with `model_metadata`
+provenance. [OpenAI identifies GPT-4.1 as non-reasoning](https://developers.openai.com/api/docs/models/gpt-4.1),
+and [Microsoft's Azure migration guidance identifies GPT-4o-mini as not supporting the reasoning parameter](https://github.com/Azure-Samples/azure-openai-to-responses/blob/main/skills/azure-openai-to-responses/references/troubleshooting.md#L59).
+Explicit live catalog values retain precedence, including positive reasoning or
+thinking evidence. Other model names, versions, and SKUs do not inherit this negative fact.
 
 ## Evidence and failure behavior
 

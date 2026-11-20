@@ -331,6 +331,48 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
 
     before { stubs.get(resource_url) { response(data: catalog) } }
 
+    native_fields = %i[reasoning thinking]
+    [%w[gpt-4o-mini 2024-07-18], %w[gpt-4.1 2025-04-14]].each do |model, version|
+      it "publishes documented unsupported thinking for #{model} #{version} GlobalStandard" do
+        tree[:instances][:primary][:provider][:deployments] = [
+          { name: 'model-slot', model: model, model_version: version, deployment_type: 'GlobalStandard' }
+        ]
+        catalog.replace([{ id: model, capabilities: { chat_completion: true } }])
+
+        described_class.refresh
+
+        lane = registry.snapshot.each_lane.first
+        expect(lane.model).to eq('model-slot')
+        expect(lane.capability_evidence[:thinking].to_h)
+          .to include(status: :unsupported, source: :model_metadata)
+      end
+
+      native_fields.each do |native_field|
+        it "preserves live #{native_field}=true over unsupported vendor thinking for #{model}" do
+          tree[:instances][:primary][:provider][:deployments] = [
+            { name: 'model-slot', model: model, model_version: version, deployment_type: 'GlobalStandard' }
+          ]
+          catalog.replace([{ id: model, capabilities: { chat_completion: true, native_field => true } }])
+
+          described_class.refresh
+
+          lane = registry.snapshot.each_lane.first
+          expect(lane.capability_evidence[:thinking].to_h)
+            .to include(status: :supported, source: :provider_catalog)
+        end
+      end
+    end
+
+    it 'keeps thinking unknown for a similar model name outside the documented tuples' do
+      tree[:instances][:primary][:provider][:deployments].first[:model] = 'gpt-4o-mini-custom'
+      catalog.replace([{ id: 'gpt-4o-mini-custom', capabilities: { chat_completion: true } }])
+
+      described_class.refresh
+
+      expect(registry.snapshot.each_lane.first.capability_evidence[:thinking].to_h)
+        .to include(status: :unknown, source: :absent)
+    end
+
     it 'uses one versioned vendor metadata owner for documented facts absent from the live catalog' do
       described_class.refresh
 
@@ -386,6 +428,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
         expect(draft.context_evidence.status).to eq(:unknown)
         expect(draft.max_output_evidence.status).to eq(:unknown)
         expect(draft.capability_evidence[:vision].status).to eq(:unknown)
+        expect(draft.capability_evidence[:thinking].to_h).to include(status: :unknown, source: :absent)
       end
     end
   end

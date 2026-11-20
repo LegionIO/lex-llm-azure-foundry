@@ -20,11 +20,11 @@ module Legion
           MODEL_METADATA = {
             %w[gpt-4o-mini 2024-07-18 GlobalStandard].freeze => {
               context_window: 128_000, max_output_tokens: 16_384,
-              capabilities: { completion: true, streaming: true, tools: true, vision: true }.freeze
+              capabilities: { completion: true, streaming: true, tools: true, vision: true, thinking: false }.freeze
             }.freeze,
             %w[gpt-4.1 2025-04-14 GlobalStandard].freeze => {
               context_window: 1_047_576, max_output_tokens: 32_768,
-              capabilities: { completion: true, streaming: true, tools: true, vision: true }.freeze
+              capabilities: { completion: true, streaming: true, tools: true, vision: true, thinking: false }.freeze
             }.freeze
           }.freeze
 

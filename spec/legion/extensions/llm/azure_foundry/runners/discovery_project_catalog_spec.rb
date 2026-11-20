@@ -111,6 +111,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       expect(draft.max_output_evidence.to_h).to include(status: :known, value: 32_768, source: :model_metadata)
       expect(draft.model_revision_evidence.to_h).to include(value: '2025-04-14', source: :provider_catalog)
       expect(draft.capability_evidence[:vision].to_h).to include(status: :supported, source: :model_metadata)
+      expect(draft.capability_evidence[:thinking].to_h).to include(status: :unsupported, source: :model_metadata)
       expect(draft.capability_evidence[:tools].to_h).to include(status: :unsupported, source: :provider_catalog)
       expect(draft.operation_evidence[:stream_chat].to_h).to include(status: :unsupported, source: :provider_catalog)
       expect(draft.publication_source).to eq(:provider_catalog)
@@ -126,6 +127,15 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       draft = runner.states.fetch('primary')[:offerings].first
       expect(draft.context_evidence.to_h).to include(value: 64_000, source: :provider_catalog)
       expect(draft.max_output_evidence.to_h).to include(value: 4096, source: :provider_catalog)
+    end
+
+    it 'preserves an observed positive reasoning flag over the documented negative' do
+      deployment[:capabilities][:reasoning] = 'true'
+
+      runner.refresh
+
+      expect(registry.snapshot.each_lane.first.capability_evidence[:thinking].to_h)
+        .to include(status: :supported, source: :provider_catalog)
     end
 
     it 'does not use synthetic top-level limits or malformed native limits as provider facts' do
