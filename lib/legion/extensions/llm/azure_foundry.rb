@@ -1,7 +1,9 @@
 # frozen_string_literal: true
 
 require 'legion/extensions/llm'
+require 'legion/settings/helper'
 require 'legion/extensions/llm/azure_foundry/settings'
+require 'legion/extensions/llm/azure_foundry/authentication'
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
@@ -11,135 +13,80 @@ require 'legion/extensions/llm/azure_foundry/actors/discovery'
 module Legion
   module Extensions
     module Llm
-      # Azure AI Foundry provider extension namespace.
+      # Named Azure instances participate in the shared provider lifecycle.
       module AzureFoundry
         extend Legion::Logging::Helper
+        extend Legion::Settings::Helper
         extend Legion::Extensions::Llm::AutoRegistration
 
         PROVIDER_FAMILY = :azure_foundry
-        PROVIDER_KEYS = %i[api_version surface project_endpoint project_api_version].freeze
-        CREDENTIAL_KEYS = %i[api_key bearer_token project_bearer_token].freeze
+        PROVIDER_KEYS = %i[api_version surface project_endpoint project_api_version project_connection_name].freeze
+        CREDENTIAL_KEYS = %i[api_key bearer_token broker project_bearer_token project_broker].freeze
+        LEGACY_KEYS = %i[base_url api_base api_key bearer_token api_version surface].freeze
 
         def self.default_settings
-          ::Legion::Extensions::Llm.provider_settings(
+          Legion::Extensions::Llm.provider_settings(
             family: PROVIDER_FAMILY,
             discovery: Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:discovery],
             instance: Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance]
           )
         end
 
-        def self.provider_class = Provider
+        def self.provider_class = Legion::Extensions::Llm::AzureFoundry::Provider
 
         def self.discover_instances
-          instances = {}
-          discover_default_instance(instances)
-          discover_named_instances(instances)
-          # enabled: false is a skip, not a credential: a disabled instance
-          # or one without a resolvable credential is never returned (the
-          # discovery pipeline reads this method as the single claimable
-          # source, and the dispatch path reads it too).
-          instances.reject { |_, config| config[:enabled] == false || unresolved_credential?(config) }
-        end
+          validate_provider_settings!
+          settings.fetch(:instances).each_with_object({}) do |(name, config), instances|
+            next if config[:enabled] == false
 
-        # The monolith actor's exact claim condition: at least one non-blank
-        # string credential (api key or bearer token).
-        def self.unresolved_credential?(config)
-          !(credential_string?(config[:azure_foundry_api_key]) ||
-            credential_string?(config[:azure_foundry_bearer_token]))
-        end
+            normalized = normalize_instance_config(config)
+            next if normalized[:azure_foundry_endpoint].nil?
+            next unless Legion::Extensions::Llm::AzureFoundry::Authentication.configured?(
+              api_key: normalized[:azure_foundry_api_key], bearer_token: normalized[:azure_foundry_bearer_token],
+              broker: normalized[:azure_foundry_broker]
+            )
 
-        def self.credential_string?(value) = value.is_a?(String) && !value.strip.empty?
-
-        def self.discover_default_instance(instances)
-          cfg = CredentialSources.setting(:extensions, :llm, :azure_foundry)
-          return unless cfg.is_a?(Hash)
-
-          endpoint = extract_endpoint_from_cfg(cfg)
-          return if endpoint.nil? || endpoint.to_s.strip.empty?
-
-          instances[:settings] = normalize_instance_config(cfg).merge(tier: extract_tier_from_cfg(cfg))
-        end
-
-        def self.discover_named_instances(instances)
-          cfg = CredentialSources.setting(:extensions, :llm, :azure_foundry)
-          return unless cfg.is_a?(Hash)
-
-          named = cfg[:instances] || cfg['instances']
-          return unless named.is_a?(Hash)
-
-          named.each { |name, config| add_named_instance(instances, name, config) }
-        end
-
-        def self.add_named_instance(instances, name, config)
-          return unless config.is_a?(Hash)
-
-          endpoint = extract_endpoint_from_cfg(config)
-          return if endpoint.nil? || endpoint.to_s.strip.empty?
-
-          instances[name.to_sym] = normalize_instance_config(config).merge(tier: extract_tier_from_cfg(config))
-        end
-
-        def self.normalize_instance_config(config)
-          normalized = config.to_h.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
-          resolve_nested_credentials(normalized)
-          resolve_nested_provider(normalized)
-          promote_endpoint_aliases(normalized)
-          promote_provider_aliases(normalized)
-          defaults = Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider]
-          defaults.transform_keys { |key| :"azure_foundry_#{key}" }.merge(normalized.compact.except(:instances))
-        end
-
-        def self.extract_endpoint_from_cfg(cfg)
-          cfg[:endpoint] || cfg['endpoint'] || cfg[:base_url] || cfg['base_url'] ||
-            cfg[:api_base] || cfg['api_base']
-        end
-
-        def self.extract_tier_from_cfg(cfg)
-          cfg[:tier] || cfg['tier'] || Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:tier]
-        end
-
-        def self.promote_endpoint_aliases(normalized)
-          normalized[:azure_foundry_endpoint] ||= normalized.delete(:endpoint)
-          normalized[:azure_foundry_endpoint] ||= normalized.delete(:base_url)
-          normalized[:azure_foundry_endpoint] ||= normalized.delete(:api_base)
-        end
-
-        def self.promote_provider_aliases(normalized)
-          (PROVIDER_KEYS + CREDENTIAL_KEYS).each do |key|
-            normalized[:"azure_foundry_#{key}"] ||= normalized.delete(key)
+            instances[name.to_sym] = normalized
           end
         end
 
-        # Nested `credentials: { api_key:, bearer_token: }` is the canonical shape
-        # (matches default_settings and every other lex-llm-* provider). Flat keys
-        # remain accepted as aliases.
-        def self.resolve_nested_credentials(normalized)
-          creds = normalized.delete(:credentials)
-          return unless creds.is_a?(Hash)
+        def self.normalize_instance_config(config)
+          if config.keys.intersect?(LEGACY_KEYS)
+            raise Legion::Extensions::Llm::ConfigurationError,
+                  'Azure instances use endpoint, credentials, and provider fields'
+          end
 
-          creds = creds.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
-          normalized[:azure_foundry_api_key] ||= creds[:api_key]
-          normalized[:azure_foundry_bearer_token] ||= creds[:bearer_token]
-          normalized[:azure_foundry_project_bearer_token] ||= creds[:project_bearer_token]
+          instance = Legion::Extensions::Llm::Utils.deep_merge(
+            Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance], config
+          )
+          normalized = instance.except(:endpoint, :credentials, :provider)
+          normalized[:azure_foundry_endpoint] = instance.fetch(:endpoint)
+          project_instance_fields(normalized, instance.fetch(:provider), PROVIDER_KEYS)
+          project_instance_fields(normalized, instance.fetch(:credentials), CREDENTIAL_KEYS)
+          normalized
         end
 
-        # Nested `provider: { api_version:, surface: }` is the canonical shape
-        # from default_settings. Flat keys remain accepted.
-        def self.resolve_nested_provider(normalized)
-          prov = normalized.delete(:provider)
-          return unless prov.is_a?(Hash)
+        def self.validate_provider_settings!
+          return unless settings[:endpoint] || LEGACY_KEYS.any? { |key| settings[key] }
 
-          prov = prov.transform_keys { |key| key.respond_to?(:to_sym) ? key.to_sym : key }
-          PROVIDER_KEYS.each { |key| normalized[:"azure_foundry_#{key}"] ||= prov[key] }
+          raise Legion::Extensions::Llm::ConfigurationError, 'Azure configuration must use named instances'
         end
 
-        private_class_method :discover_default_instance, :discover_named_instances, :add_named_instance,
-                             :normalize_instance_config, :resolve_nested_credentials, :resolve_nested_provider,
-                             :extract_endpoint_from_cfg, :extract_tier_from_cfg,
-                             :promote_endpoint_aliases, :promote_provider_aliases,
-                             :unresolved_credential?, :credential_string?
+        def self.project_instance_fields(normalized, values, keys)
+          keys.each do |key|
+            value = values.fetch(key)
+            if %i[broker project_broker].include?(key)
+              value = Legion::Extensions::Llm::AzureFoundry::Authentication.reference(broker: value)
+            end
+            normalized[:"azure_foundry_#{key}"] = value
+          end
+        end
 
-        Legion::Extensions::Llm::Configuration.register_provider_options(Provider.configuration_options)
+        private_class_method :normalize_instance_config, :project_instance_fields, :validate_provider_settings!
+
+        Legion::Extensions::Llm::Configuration.register_provider_options(
+          Legion::Extensions::Llm::AzureFoundry::Provider.configuration_options
+        )
       end
     end
   end

@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 require 'uri'
+require 'digest'
 require 'legion/extensions/llm/azure_foundry/endpoint'
 require 'legion/extensions/llm/azure_foundry/settings'
+require 'legion/extensions/llm/azure_foundry/authentication'
 
 module Legion
   module Extensions
@@ -20,10 +22,10 @@ module Legion
             end
 
             def apply_auth_headers(faraday:, instance_cfg:, **)
-              key = instance_cfg[:azure_foundry_api_key]
-              token = instance_cfg[:azure_foundry_bearer_token]
-              faraday.headers['api-key'] = key if credential_string?(key)
-              faraday.headers['Authorization'] = "Bearer #{token}" if credential_string?(token)
+              Legion::Extensions::Llm::AzureFoundry::Authentication.install_discovery(
+                faraday: faraday, api_key: instance_cfg[:azure_foundry_api_key],
+                bearer_token: instance_cfg[:azure_foundry_bearer_token], broker: instance_cfg[:azure_foundry_broker]
+              )
             end
 
             def derive_physical_id(instance_cfg:, **)
@@ -34,9 +36,11 @@ module Legion
 
               host_port = extract_host_port(url: endpoint)
               key = instance_cfg[:azure_foundry_api_key]
-              return host_port unless credential_string?(key)
+              if credential_string?(key)
+                host_port = "#{host_port}/ak:#{Legion::Extensions::Llm::CredentialSources.credential_fingerprint(key)}"
+              end
 
-              "#{host_port}/ak:#{Legion::Extensions::Llm::CredentialSources.credential_fingerprint(key)}"
+              "#{host_port}/binding:#{binding_fingerprint(instance_cfg: instance_cfg)}"
             end
 
             def extract_host_port(url:, **)
@@ -48,17 +52,45 @@ module Legion
 
             private
 
+            # Configured binding changes must reclaim the callable. Rotating
+            # broker lease contents are deliberately absent from this identity.
+            def binding_fingerprint(instance_cfg:)
+              endpoint = endpoint_for(instance_cfg: instance_cfg)
+              uri = URI.parse(endpoint.base_url)
+              binding = {
+                endpoint: [uri.scheme, uri.host.downcase, uri.port, uri.path], surface: endpoint.surface,
+                api_version: endpoint.api_version
+              }.merge(binding_details(instance_cfg: instance_cfg))
+              Digest::SHA256.hexdigest(Legion::JSON.dump(binding))
+            end
+
+            def binding_details(instance_cfg:)
+              binding = {
+                project_endpoint: instance_cfg[:azure_foundry_project_endpoint],
+                project_connection: instance_cfg[:azure_foundry_project_connection_name],
+                broker: Legion::Extensions::Llm::AzureFoundry::Authentication.reference(
+                  broker: instance_cfg[:azure_foundry_broker]
+                ),
+                project_broker: Legion::Extensions::Llm::AzureFoundry::Authentication.reference(
+                  broker: instance_cfg[:azure_foundry_project_broker]
+                )
+              }.compact
+              token = instance_cfg[:azure_foundry_bearer_token]
+              if credential_string?(token)
+                binding[:bearer] =
+                  Legion::Extensions::Llm::CredentialSources.credential_fingerprint(token)
+              end
+              binding
+            end
+
             def surface_for(instance_cfg)
-              (instance_cfg[:azure_foundry_surface] || instance_cfg[:surface] ||
-                Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider][:surface]).to_sym
+              instance_cfg.fetch(:azure_foundry_surface).to_sym
             end
 
             def endpoint_for(instance_cfg:)
-              defaults = Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider]
-              version = instance_cfg[:azure_foundry_api_version] || instance_cfg[:api_version] || defaults[:api_version]
               Legion::Extensions::Llm::AzureFoundry::Endpoint.new(
                 endpoint: instance_cfg[:azure_foundry_endpoint], surface: surface_for(instance_cfg),
-                api_version: version
+                api_version: instance_cfg[:azure_foundry_api_version]
               )
             end
 

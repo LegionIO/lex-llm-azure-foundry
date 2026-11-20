@@ -13,8 +13,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   let(:instance) do
     {
       endpoint: 'https://resource.example', tier: :cloud,
-      credentials: { api_key: 'data-plane-key', bearer_token: 'data-plane-token',
-                     project_bearer_token: 'project-token' },
+      credentials: { api_key: 'data-plane-key', project_bearer_token: 'project-token' },
       provider: { surface: :openai_v1, project_endpoint: project_url }
     }
   end
@@ -45,6 +44,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     runner.reset_state!
   end
 
+  it 'uses the shared lifecycle for every state transition and inventory operation' do
+    %i[refresh reconcile_instances update_instance claim_and_activate_instance perform_readiness
+       replace_if_changed remove_instance_state publisher states state_mutex].each do |operation|
+      expect(runner.method(operation).owner).to eq(Legion::Extensions::Llm::Discovery::Pipeline)
+    end
+  end
+
   it 'publishes paginated deployments through the shared lifecycle and reads the same registry' do
     stubs.get(deployment_url) do |env|
       expect(env.request_headers['Authorization']).to eq('Bearer project-token')
@@ -56,7 +62,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     end
     stubs.get(resource_url) do |env|
       expect(env.request_headers['api-key']).to eq('data-plane-key')
-      expect(env.request_headers['Authorization']).to eq('Bearer data-plane-token')
+      expect(env.request_headers).not_to have_key('Authorization')
       response(data: [])
     end
 
@@ -201,5 +207,108 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
 
     expect { runner.fetch_raw_models(instance_cfg: config) }
       .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /connectionName/)
+  end
+
+  context 'with an explicitly configured connected resource' do
+    let(:resource_url) { 'https://connected.example/openai/v1/models' }
+    let(:connection_url) { "#{project_url}/connections/remote?api-version=v1" }
+    let(:instance) do
+      {
+        endpoint: 'https://connected.example', tier: :cloud,
+        credentials: { api_key: 'connected-key', project_bearer_token: 'project-token' },
+        provider: { surface: :openai_v1, project_endpoint: project_url, project_connection_name: 'remote' }
+      }
+    end
+    let(:connection_info) do
+      { name: 'remote', type: 'AzureOpenAI', target: 'https://connected.example',
+        credentials: { type: 'ApiKey' } }
+    end
+
+    it 'publishes and dispatches the connected deployment through the normal instance callable' do
+      stubs.get(deployment_url) do
+        response(value: [deployment, deployment.merge(connectionName: 'remote', modelName: 'remote-base'),
+                         deployment.merge(connectionName: 'other')])
+      end
+      stubs.get(connection_url) do |env|
+        expect(env.request_headers['Authorization']).to eq('Bearer project-token')
+        expect(env.request_headers).not_to have_key('api-key')
+        response(**connection_info)
+      end
+      stubs.get(resource_url) { response(data: []) }
+      runner.refresh
+
+      lanes = registry.snapshot.each_lane.to_a
+      expect(lanes.map { |lane| [lane.instance_id, lane.model] }).to eq([%w[primary production-chat]])
+      expect(lanes.first.metadata[:canonical_model_alias]).to eq('remote-base')
+      provider = runner.states.fetch('primary')[:callable].provider
+      provider.connection.connection.adapter(:test, stubs)
+      stubs.post('https://connected.example/openai/v1/chat/completions') do |env|
+        expect(env.request_headers['api-key']).to eq('connected-key')
+        expect(env.request_headers).not_to have_key('Authorization')
+        expect(Legion::JSON.load(env.body)[:model]).to eq('production-chat')
+        response(model: 'production-chat',
+                 choices: [{ message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }])
+      end
+
+      result = provider.chat([Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'Hello')],
+                             model: 'production-chat')
+      expect(result).to be_a(Legion::Extensions::Llm::Canonical::Response)
+      stubs.verify_stubbed_calls
+    end
+
+    it 'keeps identically named deployments distinct across normal configured instances' do
+      tree[:instances][:native] = {
+        endpoint: 'https://native.example',
+        credentials: { api_key: 'native-key', project_bearer_token: 'project-token' },
+        provider: { surface: :openai_v1, project_endpoint: project_url }
+      }
+      stubs.get(deployment_url) do
+        response(value: [deployment, deployment.merge(connectionName: 'remote', modelName: 'remote-base')])
+      end
+      stubs.get(connection_url) { response(**connection_info) }
+      stubs.get(resource_url) { response(data: []) }
+      stubs.get('https://native.example/openai/v1/models') { response(data: []) }
+
+      runner.refresh
+
+      lanes = registry.snapshot.each_lane.to_a
+      expect(lanes.map { |lane| [lane.instance_id, lane.model] })
+        .to contain_exactly(%w[primary production-chat], %w[native production-chat])
+      expect(lanes.map(&:callable_handle).uniq.size).to eq(2)
+      expect(lanes.to_h { |lane| [lane.instance_id, lane.metadata[:canonical_model_alias]] })
+        .to eq('primary' => 'remote-base', 'native' => 'base-model')
+      expect(runner.method(:refresh).owner).to eq(Legion::Extensions::Llm::Discovery::Pipeline)
+    end
+
+    it 'removes old offerings when a valid connection response points to a different endpoint' do
+      target = 'https://connected.example'
+      stubs.get(deployment_url) { response(value: [deployment.merge(connectionName: 'remote')]) }
+      stubs.get(connection_url) { response(**connection_info, target: target) }
+      stubs.get(resource_url) { response(data: []) }
+      runner.refresh
+      expect(registry.snapshot.each_lane.map(&:model)).to eq(['production-chat'])
+
+      target = 'https://different.example'
+      runner.refresh
+
+      expect(registry.snapshot.each_lane.to_a).to be_empty
+      expect(runner.states.fetch('primary')[:sequence]).to eq(1)
+    end
+
+    it 'retains the last complete snapshot after a connection metadata transport failure' do
+      failed = false
+      stubs.get(deployment_url) { response(value: [deployment.merge(connectionName: 'remote')]) }
+      stubs.get(connection_url) { failed ? response(status: 503, error: 'unavailable') : response(**connection_info) }
+      stubs.get(resource_url) { response(data: []) }
+      runner.refresh
+      previous = registry.snapshot.each_lane.map(&:lane_id)
+      expect(previous).not_to be_empty
+
+      failed = true
+      runner.refresh
+
+      expect(registry.snapshot.each_lane.map(&:lane_id)).to eq(previous)
+      expect(runner.states.fetch('primary')[:sequence]).to eq(0)
+    end
   end
 end

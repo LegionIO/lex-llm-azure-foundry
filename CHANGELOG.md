@@ -5,15 +5,21 @@
 ### Fixed
 - Keep the shared `lex-llm` discovery lifecycle and registry as the sole inventory owner. Azure resource model catalogs no longer become deployed offerings merely because their catalog GET succeeds.
 - Discover deployed model names through the Foundry project deployment API, including bounded pagination, distinct project authentication, and retention of the last good snapshot after malformed or partial responses.
-- Publish only project-native deployments from project discovery. Exclude records with a nonempty `connectionName` before duplicate checking so connected-resource models are not advertised on the native endpoint; reject malformed connection identities. Cover mixed catalogs, connected-only replacement, and shared deployment names through the real publisher.
+- Support native and connected-resource deployments through normal configured instances. Bind connected instances with `provider.project_connection_name`, verify the connection's endpoint, and filter before duplicate checking. Preserve deployment names across distinct instance/callable identities. Conclusive retargeting removes stale offerings; transport failures retain the last complete snapshot.
+- Resolve configured resource/project broker references through the real host identity broker on every provider call, page, connection lookup, and readiness request. Require one credential source per scope, reject unavailable/expired or unspecified leases, and leave token renewal to the existing broker.
+- Snapshot credential-reference bindings and include endpoint/auth-reference changes in the physical binding fingerprint, reclaiming captured callables on configuration changes while retaining them across broker lease renewal.
 - Accept the documented single-model `/models/info` response and share endpoint normalization between discovery and inference, including endpoints already ending in `/models`.
 - Publish explicit operation and capability evidence. Missing facts remain unknown; model-name guesses and operator limits no longer masquerade as provider evidence.
+- Remove invented quota-domain groupings based only on deployment names, which can repeat across unrelated resources.
 - Preserve distinct deployments of a shared base model, deduplicate identical records, and reject contradictory duplicate records instead of silently choosing capabilities.
 
 ### Changed
 - Provider connection and discovery defaults live in `azure_foundry/settings.rb`.
-- OpenAI-compatible resources exposing only a base-model catalog require `provider.project_endpoint` and `credentials.project_bearer_token` for deployment discovery. Data-plane credentials are not forwarded to the project API.
+- OpenAI-compatible resources exposing only a base-model catalog require `provider.project_endpoint` and a project bearer credential or explicit project broker reference for deployment discovery. Data-plane credentials are not forwarded to the project API.
+- Use the native settings helper for configured instances and test broker integration against the actual LegionIO host lease service.
 - Updated provider documentation to describe registry snapshot reads and the actual discovery actor and runner.
+- Remove the custom completion/streaming/embedding funnel and legacy capability-name guesses. Inherit shared provider execution and preserve thinking, schemas, headers, and sampling controls through the standard callable contract; regression tests reproduce the previously dropped controls.
+- Remove top-level/flat configuration aliases, model-object coercion, resource-catalog fallback, alternate catalog envelopes, and model-family guesses. Use the shared default merge/deep copy, explicit named-instance configuration, and documented Azure response fields.
 
 ## [0.4.2] - 2026-08-25
 

@@ -42,14 +42,16 @@ module Legion
               @logger.debug { '[azure_foundry][callable] disconnected' }
             end
 
-            def chat(messages, model:, **rest)
+            def chat(messages, model:, params: nil, **rest)
               provider.enforce_canonical_messages!(messages)
-              provider.chat(messages, model: model, **rest)
+              canonical = Legion::Extensions::Llm::Canonical::Request.normalize_params!(params, self.class.name)
+              provider.chat(messages, model: model, params: canonical, **rest)
             end
 
-            def stream_chat(messages, model:, **rest, &)
+            def stream_chat(messages, model:, params: nil, **rest, &)
               provider.enforce_canonical_messages!(messages)
-              provider.stream(messages, model: model, **rest, &)
+              canonical = Legion::Extensions::Llm::Canonical::Request.normalize_params!(params, self.class.name)
+              provider.stream_chat(messages, model: model, params: canonical, **rest, &)
             end
 
             def embed(text:, model:, **rest)
@@ -58,10 +60,7 @@ module Legion
 
             def count_tokens(messages:, model:, **rest)
               provider.enforce_canonical_messages!(messages)
-              # The base heuristic ignores params (05 §2) — the fleet rest
-              # folds into the params: slot rather than splatting into the
-              # fixed base signature.
-              provider.count_tokens(messages: messages, model: model, params: rest)
+              provider.count_tokens(messages: messages, model: model, **rest)
             end
 
             # D17: production dispatch raises Legion::Extensions::Llm::*Error

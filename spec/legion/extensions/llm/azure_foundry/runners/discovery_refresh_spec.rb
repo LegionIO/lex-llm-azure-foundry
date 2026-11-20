@@ -28,16 +28,17 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   # single claimable source.
   let(:instances_cfg) do
     {
-      eastus: { endpoint: 'https://eastus.services.ai.azure.com', api_key: 'ak-spec-eastus', tier: :cloud },
-      westus: { endpoint: 'https://westus.services.ai.azure.com', api_key: 'ak-spec-westus', tier: :cloud }
+      eastus: { endpoint: 'https://eastus.services.ai.azure.com', credentials: { api_key: 'ak-spec-eastus' },
+                tier: :cloud },
+      westus: { endpoint: 'https://westus.services.ai.azure.com', credentials: { api_key: 'ak-spec-westus' }, tier: :cloud }
     }
   end
   let(:catalog) do
     [
-      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
-        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true } },
-      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small',
-        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
+      { deployment_name: 'gpt-4o-deployment', model_name: 'gpt-4o', context_window: 128_000,
+        capabilities: { chat_completion: true, embeddings: false, streaming: true } },
+      { deployment_name: 'embed-deployment', model_name: 'text-embedding-3-small',
+        capabilities: { chat_completion: false, embeddings: true } }
     ]
   end
   let(:ready) do
@@ -55,7 +56,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   def configure_settings(instances)
     defaults = Legion::Extensions::Llm::AzureFoundry.default_settings
     Legion::Settings[:extensions][:llm] = { azure_foundry: defaults.merge(instances: instances) }
-    allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(settings_tree)
   end
 
   # The production-normalized instance config (endpoint / api_key promoted to
@@ -96,7 +96,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       record = registry.snapshot.instance(instance_key: key(:eastus))
       expect(record.instance_key.instance_id).to eq('eastus')
       fingerprint = Legion::Extensions::Llm::CredentialSources.credential_fingerprint('ak-spec-eastus')
-      expect(record.instance_key.physical_id).to eq("eastus.services.ai.azure.com:443/ak:#{fingerprint}")
+      prefix = "eastus.services.ai.azure.com:443/ak:#{fingerprint}/binding:"
+      expect(record.instance_key.physical_id).to match(/\A#{Regexp.escape(prefix)}[a-f0-9]{64}\z/)
     end
 
     it 'publishes one lane per catalog model per supported operation' do
@@ -113,7 +114,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       configure_settings(
         eastus: instances_cfg[:eastus],
         naked: { endpoint: 'https://naked.services.ai.azure.com', tier: :cloud },
-        disabled: { endpoint: 'https://disabled.services.ai.azure.com', api_key: 'ak-x', enabled: false }
+        disabled: { endpoint: 'https://disabled.services.ai.azure.com', credentials: { api_key: 'ak-x' }, enabled: false }
       )
 
       expect(Legion::Extensions::Llm::AzureFoundry.discover_instances.keys).to eq([:eastus])
@@ -136,10 +137,10 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   describe 'duplicate provider_native_key regression (shared base model)' do
     let(:catalog) do
       [
-        { 'deployment_name' => 'gpt-4o-blue', 'model_name' => 'gpt-4o', 'model' => 'gpt-4o',
-          'context_window' => 128_000, 'model_type' => 'chat-completion' },
-        { 'deployment_name' => 'gpt-4o-green', 'model_name' => 'gpt-4o', 'model' => 'gpt-4o',
-          'context_window' => 128_000, 'model_type' => 'chat-completion' }
+        { deployment_name: 'gpt-4o-blue', model_name: 'gpt-4o', model: 'gpt-4o',
+          context_window: 128_000, model_type: 'chat-completion' },
+        { deployment_name: 'gpt-4o-green', model_name: 'gpt-4o', model: 'gpt-4o',
+          context_window: 128_000, model_type: 'chat-completion' }
       ]
     end
 
@@ -168,24 +169,26 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     end
 
     it 'sends the api-key header when an api key is configured' do
-      cfg = { azure_foundry_endpoint: 'https://eastus.services.ai.azure.com', azure_foundry_api_key: 'ak-1' }
+      cfg = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
+                                        azure_foundry_api_key: 'ak-1')
 
       expect(catalog_connection(cfg).headers['api-key']).to eq('ak-1')
       expect(catalog_connection(cfg).headers['Authorization']).to be_nil
     end
 
     it 'sends the bearer Authorization header when a bearer token is configured (not only api-key)' do
-      cfg = { azure_foundry_endpoint: 'https://eastus.services.ai.azure.com', azure_foundry_bearer_token: 'bt-1' }
+      cfg = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
+                                        azure_foundry_api_key: nil, azure_foundry_bearer_token: 'bt-1')
 
       expect(catalog_connection(cfg).headers['Authorization']).to eq('Bearer bt-1')
       expect(catalog_connection(cfg).headers['api-key']).to be_nil
     end
 
     it 'uses the surface catalog path: models/info on model_inference, models on openai_v1' do
-      inference = { azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak',
-                    azure_foundry_surface: :model_inference }
-      openai = { azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak',
-                 azure_foundry_surface: :openai_v1 }
+      inference = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak',
+                                              azure_foundry_surface: :model_inference)
+      openai = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak',
+                                           azure_foundry_surface: :openai_v1)
 
       expect(runner.catalog_path(instance_cfg: inference)).to eq('models/info?api-version=2024-05-01-preview')
       expect(runner.catalog_path(instance_cfg: openai)).to eq('models')
@@ -193,7 +196,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     end
 
     it 'raises CatalogFetchFailure on a non-200 catalog response' do
-      cfg = { azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak' }
+      cfg = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak')
       allow(runner).to receive(:fetch_raw_models).and_call_original
       response = Struct.new(:status, :body).new(500, '{"error": "boom"}')
       conn = instance_double(Faraday::Connection, get: response)
@@ -215,7 +218,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   # chat/embed call.
   describe 'readiness' do
     it 'probes readiness with the catalog GET (no inference)' do
-      cfg = { azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak' }
+      cfg = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak')
       allow(runner).to receive(:check_health).and_call_original
       conn = instance_double(Faraday::Connection)
       allow(runner).to receive(:build_connection).and_return(conn)
@@ -230,7 +233,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     end
 
     it 'reports a non-200 catalog GET as not ready with the status in the reason' do
-      cfg = { azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak' }
+      cfg = discover_cfg(:eastus).merge(azure_foundry_endpoint: 'https://e.example', azure_foundry_api_key: 'ak')
       allow(runner).to receive(:check_health).and_call_original
       conn = instance_double(Faraday::Connection,
                              get: Struct.new(:status, :body).new(503, '{"error": "warming up"}'))
@@ -315,7 +318,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   # and the fact that the pair lands on the PUBLISHED LANE, never a draft.
   describe 'write-time lane weights' do
     let(:instances_cfg) do
-      { eastus: { endpoint: 'https://eastus.services.ai.azure.com', api_key: 'ak-spec-eastus', tier: :cloud } }
+      { eastus: { endpoint: 'https://eastus.services.ai.azure.com', credentials: { api_key: 'ak-spec-eastus' }, tier: :cloud } }
     end
 
     def set_weights(tier: 100, provider: 100, instance: 100, model: nil)
@@ -343,9 +346,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       set_weights(tier: 110, provider: 120, instance: 130, model: 140)
       cfg = discover_cfg(:eastus)
 
+      model_data = { deployment_name: 'gpt-4o-deployment', model_name: 'gpt-4o' }
       draft = runner.send(:build_offering_draft, instance_cfg: cfg, instance_key: key(:eastus),
-                                                 model_id: 'gpt-4o-deployment',
-                                                 model_data: { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o' })
+                                                 model_id: 'gpt-4o-deployment', model_data: model_data)
 
       expect(draft.weight_inputs).to eq(tier: 100, provider: 100, instance: 100, model_or_offering: 100)
       expect(draft.base_weight).to eq(100_000_000)

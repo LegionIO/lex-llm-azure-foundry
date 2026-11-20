@@ -19,27 +19,22 @@ module Legion
 
             private
 
-            def build_quota_domains(model_id:)
-              %i[chat stream_chat embed].to_h { |operation| [operation, "azure:deployment:#{model_id}"] }
-            end
-
             def build_context_evidence(entry:, **)
-              value = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.context_window_for(entry)
+              value = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.context_window_for(entry: entry)
               value_evidence(value)
             end
 
             def build_max_output_evidence(entry:, **)
               value = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.positive_integer(
-                entry[:max_output_tokens] || entry['max_output_tokens']
+                value: entry[:max_output_tokens]
               )
               value_evidence(value)
             end
 
-            def build_offering_metadata(model_id:, base_name:, instance_key:)
-              family = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_family_for(base_name || model_id)
+            def build_offering_metadata(base_name:, instance_key:, publisher:)
               {
                 canonical_model_alias: base_name,
-                model_family: family,
+                model_publisher: publisher,
                 instance_id: instance_key.instance_id,
                 physical_id: instance_key.physical_id
               }.compact.freeze
@@ -63,7 +58,7 @@ module Legion
               status = explicit_status(entry, keys)
               return status unless status == :unknown
 
-              type = entry[:model_type] || entry['model_type']
+              type = entry[:model_type]
               return :unknown unless %w[chat-completion embeddings].include?(type)
 
               expected = operation == :embed ? 'embeddings' : 'chat-completion'
@@ -83,11 +78,11 @@ module Legion
             end
 
             def explicit_status(entry, keys)
-              capabilities = entry[:capabilities] || entry['capabilities']
+              capabilities = entry[:capabilities]
               return :unknown unless capabilities.is_a?(Hash)
 
               keys.each do |key|
-                value = capabilities.key?(key) ? capabilities[key] : capabilities[key.to_s]
+                value = capabilities[key]
                 return :supported if [true, 'true'].include?(value)
                 return :unsupported if [false, 'false'].include?(value)
               end

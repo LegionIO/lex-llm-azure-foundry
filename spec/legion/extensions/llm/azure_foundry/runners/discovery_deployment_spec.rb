@@ -11,7 +11,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     )
   end
   let(:config) do
-    { azure_foundry_endpoint: 'https://resource.example/models', azure_foundry_surface: :model_inference,
+    { tier: :cloud, azure_foundry_endpoint: 'https://resource.example/models', azure_foundry_surface: :model_inference,
       azure_foundry_api_version: '2024-05-01-preview' }
   end
 
@@ -51,12 +51,12 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     allow(runner).to receive(:build_connection).and_return(connection)
     cfg = config.merge(azure_foundry_surface: :openai_v1)
 
-    expect { runner.build_offerings(instance_cfg: cfg, instance_key: key) }
-      .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /deploy/i)
+    expect { runner.fetch_raw_models(instance_cfg: cfg) }
+      .to raise_error(Legion::Extensions::Llm::ConfigurationError, /project_endpoint/)
   end
 
   it 'honors explicit negative operation evidence even when the name looks like an embedding model' do
-    offering = draft({ id: 'embed-in-name', capabilities: { embeddings: false, chat_completion: true } })
+    offering = draft({ deployment_name: 'embed-in-name', capabilities: { embeddings: false, chat_completion: true } })
 
     expect(offering.operation_evidence[:embed].status).to eq(:unsupported)
     expect(offering.operation_evidence[:chat].status).to eq(:supported)
@@ -64,7 +64,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   end
 
   it 'leaves absent operation and tool evidence unknown instead of guessing from names' do
-    offering = draft({ id: 'gpt-chat-embed-vision' })
+    offering = draft({ deployment_name: 'gpt-chat-embed-vision' })
 
     expect(offering.operation_evidence.values_at(:chat, :embed).map(&:status)).to eq(%i[unknown unknown])
     expect(offering.capability_evidence.values_at(:tools, :vision, :thinking).map(&:status))
@@ -72,15 +72,17 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
   end
 
   it 'does not relabel operator context limits as authoritative provider facts' do
-    offering = draft({ id: 'deployment' }, instance_cfg: config.merge(context_window: 65_536))
+    offering = draft({ deployment_name: 'deployment' }, instance_cfg: config.merge(context_window: 65_536))
 
     expect(offering.context_evidence.status).to eq(:unknown)
     expect(offering.context_evidence.value).to be_nil
   end
 
   it 'preserves deployment identity when the service also supplies a base model id' do
-    parser = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser
+    page = Legion::Extensions::Llm::AzureFoundry::DeploymentCatalogParser.page(
+      body: { value: [{ id: 'base-model', name: 'production-chat', type: 'ModelDeployment', modelName: 'base-model' }] }
+    )
 
-    expect(parser.model_id_for({ id: 'base-model', deployment_name: 'production-chat' })).to eq('production-chat')
+    expect(runner.model_id_from(page[:entries].first)).to eq('production-chat')
   end
 end

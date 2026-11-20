@@ -2,6 +2,7 @@
 
 require 'uri'
 require 'legion/extensions/llm/azure_foundry/deployment_catalog_parser'
+require 'legion/extensions/llm/azure_foundry/helpers/project_connection'
 
 module Legion
   module Extensions
@@ -10,27 +11,36 @@ module Legion
         module Helpers
           # Azure deployment transport; publication stays in Discovery::Pipeline.
           module ProjectCatalog
+            include Legion::Extensions::Llm::AzureFoundry::Helpers::ProjectConnection
+
             private
 
             def fetch_project_deployments(instance_cfg:)
               endpoint = project_catalog_endpoint(instance_cfg: instance_cfg)
               conn = project_connection(instance_cfg: instance_cfg, endpoint: endpoint)
-              version = instance_cfg[:azure_foundry_project_api_version] ||
-                        Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:provider][:project_api_version]
+              version = instance_cfg.fetch(:azure_foundry_project_api_version)
               initial = URI("#{endpoint}/deployments?#{URI.encode_www_form('api-version' => version)}")
-              project_catalog_pages(connection: conn, initial: initial)
+              name = project_connection_name(instance_cfg: instance_cfg)
+              entries = project_catalog_pages(connection: conn, initial: initial, connection_name: name)
+              return entries if entries.empty?
+              return [] unless project_connection_matches?(instance_cfg: instance_cfg, connection: conn,
+                                                           endpoint: endpoint, version: version)
+
+              entries
             end
 
             def project_connection(instance_cfg:, endpoint:)
               token = instance_cfg[:azure_foundry_project_bearer_token]
-              unless credential_string?(token)
+              broker = instance_cfg[:azure_foundry_project_broker]
+              unless Legion::Extensions::Llm::AzureFoundry::Authentication.configured?(bearer_token: token,
+                                                                                       broker: broker)
                 raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure,
-                      'Azure project deployment discovery requires credentials.project_bearer_token ' \
-                      'with the ai.azure.com scope'
+                      'Azure project discovery requires credentials.project_bearer_token or project_broker ' \
+                      'for the ai.azure.com scope'
               end
 
-              config = instance_cfg.except(:azure_foundry_api_key, :azure_foundry_bearer_token)
-                                   .merge(azure_foundry_bearer_token: token)
+              config = instance_cfg.except(:azure_foundry_api_key, :azure_foundry_bearer_token, :azure_foundry_broker)
+                                   .merge(azure_foundry_bearer_token: token, azure_foundry_broker: broker)
               limits = settings[:discovery]
               build_connection(base_url: endpoint, instance_cfg: config,
                                timeout: limits[:request_timeout], open_timeout: limits[:open_timeout])
@@ -47,15 +57,16 @@ module Legion
               uri.to_s.sub(%r{/+\z}, '')
             end
 
-            def project_catalog_pages(connection:, initial:)
+            def project_catalog_pages(connection:, initial:, connection_name:)
               page = initial
               entries = []
               visited = Set.new
               settings[:discovery][:max_pages].times do
-                result = read_project_page(connection: connection, page: page, visited: visited)
+                result = read_project_page(connection: connection, page: page, visited: visited,
+                                           connection_name: connection_name)
                 entries.concat(result[:entries])
                 unless result[:next_link]
-                  return Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.dedupe_by_model_id(entries)
+                  return Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.dedupe_by_model_id(entries: entries)
                 end
 
                 page = next_project_page(initial: initial, next_link: result[:next_link])
@@ -64,7 +75,7 @@ module Legion
                     'Azure deployment pagination exceeded discovery.max_pages'
             end
 
-            def read_project_page(connection:, page:, visited:)
+            def read_project_page(connection:, page:, visited:, connection_name:)
               unless visited.add?(page.to_s)
                 raise Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
                       'Azure deployment pagination cycle'
@@ -75,7 +86,9 @@ module Legion
                 raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure,
                       "deployment catalog fetch returned HTTP #{response.status}"
               end
-              Legion::Extensions::Llm::AzureFoundry::DeploymentCatalogParser.page(body: catalog_body(response))
+              Legion::Extensions::Llm::AzureFoundry::DeploymentCatalogParser.page(
+                body: catalog_body(response), connection_name: connection_name
+              )
             end
 
             def next_project_page(initial:, next_link:)

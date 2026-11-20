@@ -45,23 +45,48 @@ themselves prove that matching deployments exist. Inference requests need the
 `DeploymentNotFound` even when catalog authentication succeeds.
 
 For OpenAI v1 resources, configure the Foundry project endpoint and its
-project-scoped bearer credential. Discovery reads
-`GET <project_endpoint>/deployments?api-version=v1` and publishes each project-native
+project-scoped credential or broker reference. Discovery reads
+`GET <project_endpoint>/deployments?api-version=v1` and publishes the selected
 deployment's `name`. The publisher-specific model name is metadata, not dispatch identity.
-A gateway catalog that explicitly supplies `deployment_name` can also be read;
-bare base-model entries are rejected.
+OpenAI v1 discovery requires this project source. There is no resource model-list
+fallback or inference of deployments from base-model names.
 
-This discovery source supports only project-native deployments. Records with a
-nonempty `connectionName` belong to connected resources and are excluded before
-publication and duplicate checking. Their endpoint and credentials are not inferred
-or reused. A catalog containing only connected-resource deployments publishes an
-empty native snapshot. Configure connected resources separately using their own
-deployment inventory and credentials.
+Each configured instance binds to one resource endpoint and credential source,
+just as other providers do. With no `project_connection_name`, it publishes the
+project-native deployments. Set `provider.project_connection_name` to bind an
+instance to a connected Azure OpenAI resource. Discovery verifies the named
+connection's metadata and target endpoint before publishing only that connection's
+deployments. The model string remains the deployment name; two instances may serve
+the same deployment name without sharing a callable or credentials.
+
+A successful connection response that points elsewhere clears the old scope's
+offerings. A transport/authentication/malformed-response failure retains the last
+complete snapshot under the shared lifecycle. No credentials are fetched from
+project connection metadata or forwarded between resource instances.
 
 Project discovery uses its own bearer credential with the
 `https://ai.azure.com/.default` scope. The resource API key and resource bearer
-token are never forwarded to the project endpoint. Credential retrieval and
-refresh remain owned by Legion settings and the configured credential source.
+token are never forwarded to the project endpoint.
+
+`credentials.broker` and `credentials.project_broker` accept explicit
+`provider` / `qualifier` references to the existing `Legion::Identity::Broker`.
+The broker owns credential acquisition and renewal. Azure reads its current valid
+lease for every inference request, readiness check, project page, and connection
+lookup. It keeps no token cache or renewal worker. Missing/expired leases fail
+authentication; the adapter never substitutes a default Graph credential.
+
+Broker reference names from JSON are converted to symbols, matching the host's
+symbol-qualified registrations. The identity issuer registered under each reference
+must provide the appropriate audience: `https://ai.azure.com/.default` for project
+operations and the resource's inference audience for resource requests. These
+references select existing scoped leases; they do not request OAuth consent or
+mint new scopes. Broker mode requires the LegionIO identity runtime. Static
+API-key/bearer operation remains available without loading that host service.
+The resource configures exactly one credential source: API key, bearer token, or
+broker reference. Project discovery uses either a project bearer token or a
+project broker reference; it does not accept resource API keys.
+Ambiguous combinations are rejected; a failed source is never
+replaced by another credential source.
 
 Example settings under `extensions.llm.azure_foundry`:
 
@@ -77,7 +102,24 @@ instances:
       surface: openai_v1
       project_endpoint: https://resource.example.services.ai.azure.com/api/projects/primary
       project_api_version: v1
+  connected:
+    endpoint: https://connected.example.openai.azure.com
+    credentials:
+      broker:
+        provider: azure_identity
+        qualifier: cognitive_services
+      project_broker:
+        provider: azure_identity
+        qualifier: foundry_project
+    provider:
+      surface: openai_v1
+      project_endpoint: https://resource.example.services.ai.azure.com/api/projects/primary
+      project_connection_name: connected-resource
 ```
+
+The broker names above are examples: use provider/qualifier pairs already
+registered by your identity integration. Resource and project references are
+independent and are never implicitly exchanged.
 
 The data-plane endpoint may already end in `/openai/v1`. The project endpoint
 is independently configured; the adapter does not guess a project or transform
@@ -100,9 +142,15 @@ The documented `/models/info` response identifies the deployed model through
 `model_name` and its operation through `model_type`. Discovery and inference
 share the same URL builder, so a configured `/models` suffix is not duplicated.
 
-A top-level endpoint still creates the `settings` instance. Nested credentials
-and provider settings are canonical; existing flat credential/provider aliases
-remain accepted. Disabled or credential-less instances are not claimed.
+Only named instances with nested `credentials` and `provider` fields are accepted.
+Top-level instance shortcuts, flat credential/provider fields, and endpoint aliases
+are removed. The shared default-settings merge supplies defaults once at this
+configuration boundary. Dispatch receives the resulting explicit configuration.
+Disabled or credential-less instances are not claimed.
+An explicit broker binding remains claimable while its lease is temporarily
+unavailable, allowing the existing readiness/probe lifecycle to recover. Binding
+changes reclaim the callable through the shared physical-identity lifecycle;
+ordinary broker token renewal does not replace the callable.
 
 ## Evidence and failure behavior
 
@@ -110,6 +158,11 @@ remain accepted. Disabled or credential-less instances are not claimed.
   evidence. Names such as “embed” or “vision” do not establish capabilities.
 - Missing operation, tool, vision, thinking, or limit facts remain unknown.
   Operator permissions and configured limits are not relabeled as provider facts.
+- Deployment names do not establish quota sharing across resources. Without
+  authoritative quota-domain evidence, offerings leave that mapping empty.
+- Provider execution inherits `chat`, `stream_chat`, `complete`, `embed`, `health`,
+  and `discover_offerings` from `lex-llm`. The callable packages canonical fields
+  for those methods; Azure has no second execution funnel or capability-name guesses.
 - Context and output limits come from valid positive integer catalog fields.
   No model-size lookup table supplies missing limits.
 - Deployment names remain distinct even when several deployments share one base
@@ -157,6 +210,8 @@ bundle exec rubocop -A
 Specs exercise the shared SSOT conformance kit, real inventory publication,
 canonical callable payloads, documented model-info parsing, project pagination,
 authentication boundaries, failed-refresh retention, and explicit evidence.
+Broker tests load the real host broker, lease, and renewer from the test dependency.
+Only external HTTP transport and the token issuer are controlled fixtures.
 
 Microsoft references:
 [model-inference info](https://learn.microsoft.com/en-us/rest/api/microsoftfoundry/model-inference/get-model-info/get-model-info?view=rest-microsoftfoundry-model-inference-2024-05-01-preview),

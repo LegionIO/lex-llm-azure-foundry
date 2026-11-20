@@ -84,14 +84,14 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     expect(lanes.none? { |lane| lane.model == 'embedding-prod' && lane.operation == :chat }).to be(true)
   end
 
-  it 'preserves catalog-reported names and infers family from the base model' do
+  it 'preserves catalog-reported names and publisher metadata' do
     publish_default_instance
     lane = provider.discover_offerings(live: true)
                    .find { |l| l.operation == :chat && l.model == 'gpt-4o-prod' }
 
     expect(lane.instance_key.provider_family).to eq(:azure_foundry)
     expect(lane.model).to eq('gpt-4o-prod')
-    expect(lane.metadata).to include(model_family: :openai)
+    expect(lane.metadata).to include(model_publisher: 'OpenAI')
   end
 
   it 'uses the provider instance tier and instance id in the published lanes' do
@@ -99,6 +99,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     lane = described_class::Provider.new(
       azure_foundry_endpoint: 'https://example.services.ai.azure.com',
       azure_foundry_api_key: 'test-key',
+      azure_foundry_surface: :model_inference, azure_foundry_api_version: '2024-05-01-preview',
       instance_id: :eastus
     ).discover_offerings(live: true).first
 
@@ -116,7 +117,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     readiness = provider.readiness(live: true)
 
     expect(readiness).to include(provider: :azure_foundry, live: true, local: false, remote: true)
-    expect(readiness).to include(ready: true, status: 'healthy')
+    expect(readiness).to include(ready: true, health: { checked: true, status: 'healthy', status_code: 200 })
     expect(readiness).not_to have_key(:circuit_state)
   end
 
@@ -157,7 +158,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
 
     it 'rejects plain Hash messages at stream' do
-      expect { provider.stream(hash_messages, model: 'gpt-4o') }
+      expect { provider.stream_chat(hash_messages, model: 'gpt-4o') }
         .to raise_error(ArgumentError, /Canonical::Message/)
     end
 
@@ -185,131 +186,81 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     end
   end
 
-  describe '.discover_instances' do
-    before do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(nil)
-    end
+  def configure_provider(value:)
+    configured = Legion::Extensions::Llm::Utils.deep_merge(described_class.default_settings, value)
+    Legion::Settings[:extensions][:llm] = { azure_foundry: configured }
+  end
 
-    it 'returns an empty hash when no settings are configured' do
+  describe '.discover_instances' do
+    before { configure_provider(value: {}) }
+
+    it 'leaves the unconfigured default instance unclaimed' do
       expect(described_class.discover_instances).to eq({})
     end
 
-    it 'discovers a :settings instance when endpoint is present' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ endpoint: 'https://my.azure.com', api_key: 'ak-123' })
+    it 'discovers normal named instances with nested provider and credential fields' do
+      configure_provider(value: { instances: { primary: {
+                           endpoint: 'https://resource.example/openai/v1', tier: :fleet,
+                           credentials: { api_key: 'configured-key' },
+                           provider: { surface: :openai_v1, api_version: 'v1' }
+                         } } })
 
-      instances = described_class.discover_instances
-
-      expect(instances[:settings]).to include(azure_foundry_endpoint: 'https://my.azure.com',
-                                              azure_foundry_api_key: 'ak-123',
-                                              tier: :cloud)
-      expect(instances[:settings]).not_to have_key(:endpoint)
-    end
-
-    it 'preserves an explicit tier for the default discovered instance' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ endpoint: 'https://my.azure.com', api_key: 'ak-123', tier: :private })
-
-      instances = described_class.discover_instances
-
-      expect(instances[:settings]).to include(tier: :private)
-    end
-
-    it 'skips the default instance when endpoint is missing' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ api_key: 'ak-123' })
-
-      instances = described_class.discover_instances
-
-      expect(instances).not_to have_key(:settings)
-    end
-
-    it 'discovers named instances from the instances sub-key' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ instances: { prod: { endpoint: 'https://prod.azure.com', api_key: 'ak-prod' } } })
-
-      instances = described_class.discover_instances
-
-      expect(instances[:prod]).to include(azure_foundry_endpoint: 'https://prod.azure.com',
-                                          azure_foundry_api_key: 'ak-prod',
-                                          tier: :cloud)
-    end
-
-    it 'preserves an explicit tier for named instances' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ instances: { prod: { endpoint: 'https://prod.azure.com', api_key: 'ak-prod', tier: :fleet } } })
-
-      instances = described_class.discover_instances
-
-      expect(instances[:prod]).to include(tier: :fleet)
-    end
-
-    it 'normalizes endpoint aliases and API version settings' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ base_url: 'https://openai.azure.com', api_key: 'ak-123',
-                      api_version: '2024-05-01-preview' })
-
-      expect(described_class.discover_instances[:settings]).to include(
-        azure_foundry_endpoint: 'https://openai.azure.com',
-        azure_foundry_api_key: 'ak-123',
-        azure_foundry_api_version: '2024-05-01-preview'
+      expect(described_class.discover_instances[:primary]).to include(
+        azure_foundry_endpoint: 'https://resource.example/openai/v1',
+        azure_foundry_api_key: 'configured-key', azure_foundry_surface: :openai_v1,
+        azure_foundry_api_version: 'v1', tier: :fleet
       )
     end
 
-    it 'resolves the canonical nested credentials and provider shape' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ instances: { shrutich: {
-                      endpoint: 'https://shrutich.openai.azure.com/openai/v1',
-                      credentials: { api_key: 'ak-nested', bearer_token: 'bt-nested' },
-                      provider: { surface: 'openai_v1', api_version: '2024-05-01-preview' }
-                    } } })
+    it 'uses the shared deep-copy merge to isolate every configured binding value' do
+      configure_provider(value: { instances: { primary: {
+                           endpoint: +'https://resource.example',
+                           credentials: { api_key: +'configured-key' },
+                           provider: { surface: +'openai_v1', project_connection_name: +'remote' }
+                         } } })
+      captured = described_class.discover_instances.fetch(:primary)
+      configured = Legion::Settings[:extensions][:llm][:azure_foundry][:instances][:primary]
+      configured[:endpoint].replace('https://changed.example')
+      configured[:credentials][:api_key].replace('changed-key')
+      configured[:provider][:project_connection_name].replace('changed-connection')
 
-      expect(described_class.discover_instances[:shrutich]).to include(
-        azure_foundry_endpoint: 'https://shrutich.openai.azure.com/openai/v1',
-        azure_foundry_api_key: 'ak-nested',
-        azure_foundry_bearer_token: 'bt-nested',
-        azure_foundry_surface: 'openai_v1',
-        azure_foundry_api_version: '2024-05-01-preview'
-      )
+      expect(captured).to include(azure_foundry_endpoint: 'https://resource.example',
+                                  azure_foundry_api_key: 'configured-key',
+                                  azure_foundry_project_connection_name: 'remote')
+      expect(described_class.discover_instances[:primary][:azure_foundry_endpoint]).to eq('https://changed.example')
     end
 
-    it 'skips named instances without an endpoint' do
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting)
-        .with(:extensions, :llm, :azure_foundry)
-        .and_return({ instances: { incomplete: { api_key: 'ak-no-ep' } } })
+    it 'does not accept a top-level endpoint as a synthetic settings instance' do
+      configure_provider(value: { endpoint: 'https://resource.example' })
 
-      instances = described_class.discover_instances
-
-      expect(instances).not_to have_key(:incomplete)
+      expect { described_class.discover_instances }
+        .to raise_error(Legion::Extensions::Llm::ConfigurationError, /named instances/)
     end
 
-    it 'excludes the instances sub-key from the default instance config' do
-      # Both instances carry a credential: the credential-less reject is
-      # asserted by its own examples above; here the invariant under test is
-      # that the instances sub-key does not leak into the default config.
-      cfg = { endpoint: 'https://main.azure.com', api_key: 'ak-main',
-              instances: { extra: { endpoint: 'https://extra.azure.com', api_key: 'ak-extra' } } }
-      allow(Legion::Extensions::Llm::CredentialSources).to receive(:setting).and_return(cfg)
+    %i[base_url api_base api_key bearer_token api_version surface].each do |legacy|
+      it "rejects the retired flat #{legacy} field" do
+        configure_provider(value: { instances: { primary: { endpoint: 'https://resource.example', legacy => 'old' } } })
 
-      expect(described_class.discover_instances[:settings]).not_to have_key(:instances)
+        expect { described_class.discover_instances }
+          .to raise_error(Legion::Extensions::Llm::ConfigurationError, /endpoint, credentials, and provider/)
+      end
+    end
+
+    it 'does not claim a named instance with no endpoint' do
+      configure_provider(value: { instances: { incomplete: { credentials: { api_key: 'key' } } } })
+
+      expect(described_class.discover_instances).not_to have_key(:incomplete)
     end
   end
 
   def default_catalog_entries
     [
-      { 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
-        'max_output_tokens' => 16_384,
-        'capabilities' => { 'chat_completion' => true, 'embeddings' => false,
-                            'streaming' => true, 'function_calling' => true } },
-      { 'id' => 'embedding-prod', 'model_name' => 'text-embedding-3-small',
-        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
+      { deployment_name: 'gpt-4o-prod', model_name: 'gpt-4o', model_publisher: 'OpenAI', context_window: 128_000,
+        max_output_tokens: 16_384,
+        capabilities: { chat_completion: true, embeddings: false,
+                        streaming: true, function_calling: true } },
+      { deployment_name: 'embedding-prod', model_name: 'text-embedding-3-small',
+        capabilities: { chat_completion: false, embeddings: true } }
     ]
   end
 
@@ -353,6 +304,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   # instance id, so the base Registry-snapshot read path has lanes to serve.
   def publish_instance(instance_id: 'default', tier: :cloud)
     instance_cfg = {
+      azure_foundry_surface: :model_inference, azure_foundry_api_version: '2024-05-01-preview',
       azure_foundry_endpoint: 'https://example.services.ai.azure.com',
       azure_foundry_api_key: 'test-key',
       tier:
@@ -384,7 +336,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     runner = Legion::Extensions::Llm::AzureFoundry::Runners::Discovery
     default_catalog_entries.map do |entry|
       runner.send(:build_offering_draft, instance_cfg:, instance_key:,
-                                         model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                                         model_id: entry.fetch(:deployment_name),
                                          model_data: entry)
     end
   end
@@ -409,8 +361,8 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     {
       provider: :azure_foundry,
       ready: true,
-      checked: false,
-      status: 'healthy'
+      status: 'healthy',
+      raw: { checked: false }
     }
   end
 
@@ -425,7 +377,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   end
 
   def fake_response(body)
-    Struct.new(:body).new(body)
+    Struct.new(:body, :status).new(body, 200)
   end
 
   def configure_openai_v1_surface

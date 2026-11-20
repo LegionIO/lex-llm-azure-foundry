@@ -15,6 +15,11 @@ group :development do
 end
 
 group :test do
+  # Broker integration is exercised against the actual host lease service.
+  legionio_path = File.expand_path('../../LegionIO', __dir__)
+  legionio_options = File.directory?(legionio_path) ? { path: legionio_path } : {}
+  gem 'legionio', **legionio_options
+
   # The published lex-llm (>= 0.8.0, declared in the gemspec) provides the
   # WeightSchema/WeightReconciler and Canonical types these specs require.
   # Use the local checkout when present (development); CI resolves the

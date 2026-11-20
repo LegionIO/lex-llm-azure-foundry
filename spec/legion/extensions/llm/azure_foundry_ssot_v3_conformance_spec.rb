@@ -45,7 +45,7 @@ class RecordingAzureFoundryProvider
     { role: 'assistant', content: 'test response', model: }
   end
 
-  def stream(_messages, model:, **, &)
+  def stream_chat(_messages, model:, **, &)
     @call_count += 1
     { role: 'assistant', content: 'streamed response', model: }
   end
@@ -77,7 +77,7 @@ class ModelCapturingAzureFoundryProvider
     record(:chat, model)
   end
 
-  def stream(_messages, model:, **, &)
+  def stream_chat(_messages, model:, **, &)
     record(:stream_chat, model)
   end
 
@@ -106,25 +106,25 @@ end
 module AzureFoundryCatalogFixtures
   CATALOGS = {
     'eastus-prod' => [
-      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
-        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true,
-                            'function_calling' => true } }
+      { deployment_name: 'gpt-4o-deployment', model_name: 'gpt-4o', context_window: 128_000,
+        capabilities: { chat_completion: true, embeddings: false, streaming: true,
+                        function_calling: true } }
     ].freeze,
     'westus-prod' => [
-      { 'id' => 'gpt-4o-mini-deployment', 'model_name' => 'gpt-4o-mini', 'context_window' => 128_000,
-        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true,
-                            'function_calling' => true } }
+      { deployment_name: 'gpt-4o-mini-deployment', model_name: 'gpt-4o-mini', context_window: 128_000,
+        capabilities: { chat_completion: true, embeddings: false, streaming: true,
+                        function_calling: true } }
     ].freeze,
     'eastus-multi' => [
-      { 'id' => 'gpt-4o-deployment', 'model_name' => 'gpt-4o', 'context_window' => 128_000,
-        'capabilities' => { 'chat_completion' => true, 'embeddings' => false, 'streaming' => true,
-                            'function_calling' => true } },
-      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small',
-        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
+      { deployment_name: 'gpt-4o-deployment', model_name: 'gpt-4o', context_window: 128_000,
+        capabilities: { chat_completion: true, embeddings: false, streaming: true,
+                        function_calling: true } },
+      { deployment_name: 'embed-deployment', model_name: 'text-embedding-3-small',
+        capabilities: { chat_completion: false, embeddings: true } }
     ].freeze,
     'eastus-embed' => [
-      { 'id' => 'embed-deployment', 'model_name' => 'text-embedding-3-small',
-        'capabilities' => { 'chat_completion' => false, 'embeddings' => true } }
+      { deployment_name: 'embed-deployment', model_name: 'text-embedding-3-small',
+        capabilities: { chat_completion: false, embeddings: true } }
     ].freeze
   }.freeze
 end
@@ -189,7 +189,7 @@ class AzureFoundrySsotHarness
     catalog_entries(instance_config).map do |entry|
       discovery_runner.send(:build_offering_draft,
                             instance_cfg: config, instance_key: instance_key,
-                            model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                            model_id: entry.fetch(:deployment_name),
                             model_data: entry)
     end
   end
@@ -264,19 +264,23 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       expect(ssot_harness.instance_id(instance_config: ssot_harness.instance_configs[1])).to eq('westus-prod')
     end
 
-    it 'keeps the derived host:port/ak:fingerprint as the secondary physical id' do
+    it 'keeps endpoint and credential fingerprints in the secondary binding id' do
       config = ssot_harness.instance_configs[0]
       fingerprint = Legion::Extensions::Llm::CredentialSources.credential_fingerprint(
         config[:azure_foundry_api_key]
       )
       host_port = 'eastus-prod.services.ai.azure.com:443'
-      expect(ssot_harness.physical_id(instance_config: config)).to eq("#{host_port}/ak:#{fingerprint}")
+      prefix = "#{host_port}/ak:#{fingerprint}/binding:"
+      expect(ssot_harness.physical_id(instance_config: config)).to match(/\A#{Regexp.escape(prefix)}[a-f0-9]{64}\z/)
     end
 
-    it 'derives the physical id as host:port without API key' do
+    it 'includes a binding fingerprint without exposing a bearer credential' do
       config = { azure_foundry_endpoint: 'https://public.services.ai.azure.com',
-                 azure_foundry_bearer_token: 'bearer-only' }
-      expect(ssot_harness.physical_id(instance_config: config)).to eq('public.services.ai.azure.com:443')
+                 azure_foundry_bearer_token: 'bearer-only', azure_foundry_surface: :model_inference,
+                 azure_foundry_api_version: '2024-05-01-preview' }
+      physical = ssot_harness.physical_id(instance_config: config)
+      expect(physical).to match(%r{\Apublic\.services\.ai\.azure\.com:443/binding:[a-f0-9]{64}\z})
+      expect(physical).not_to include('bearer-only')
     end
 
     it 'raises instead of falling back to a placeholder endpoint for the physical id' do
@@ -297,9 +301,11 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     # distinguishes same-name-different-credential diagnostics.
     it 'keeps two config names distinct against the same endpoint (no collapse)' do
       config_a = { name: 'apollo', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
-                   azure_foundry_api_key: 'ak-one' }
+                   azure_foundry_api_key: 'ak-one', azure_foundry_surface: :model_inference,
+                   azure_foundry_api_version: '2024-05-01-preview' }
       config_b = { name: 'apollo-embed', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
-                   azure_foundry_api_key: 'ak-one' }
+                   azure_foundry_api_key: 'ak-one', azure_foundry_surface: :model_inference,
+                   azure_foundry_api_version: '2024-05-01-preview' }
       expect(ssot_harness.instance_id(instance_config: config_a)).not_to eq(
         ssot_harness.instance_id(instance_config: config_b)
       )
@@ -317,18 +323,22 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
     it 'distinguishes same-name keys against the same endpoint via the physical id fingerprint' do
       config_a = { name: 'eastus-prod', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
-                   azure_foundry_api_key: 'ak-one' }
+                   azure_foundry_api_key: 'ak-one', azure_foundry_surface: :model_inference,
+                   azure_foundry_api_version: '2024-05-01-preview' }
       config_b = { name: 'eastus-prod', azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
-                   azure_foundry_api_key: 'ak-two' }
+                   azure_foundry_api_key: 'ak-two', azure_foundry_surface: :model_inference,
+                   azure_foundry_api_version: '2024-05-01-preview' }
       expect(ssot_harness.physical_id(instance_config: config_a))
         .not_to eq(ssot_harness.physical_id(instance_config: config_b))
     end
 
     it 'lowercases the host for normalized physical id comparison' do
       config_upper = { azure_foundry_endpoint: 'https://EastUS-Prod.Services.AI.Azure.COM',
-                       azure_foundry_api_key: 'ak-1' }
+                       azure_foundry_api_key: 'ak-1', azure_foundry_surface: :model_inference,
+                       azure_foundry_api_version: '2024-05-01-preview' }
       config_lower = { azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
-                       azure_foundry_api_key: 'ak-1' }
+                       azure_foundry_api_key: 'ak-1', azure_foundry_surface: :model_inference,
+                       azure_foundry_api_version: '2024-05-01-preview' }
       expect(ssot_harness.physical_id(instance_config: config_upper))
         .to eq(ssot_harness.physical_id(instance_config: config_lower))
     end
@@ -342,7 +352,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         name: 'eastus-multi',
         azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
         azure_foundry_api_key: 'ak-azure-eastus-prod-001',
-        azure_foundry_surface: :model_inference
+        azure_foundry_surface: :model_inference, azure_foundry_api_version: '2024-05-01-preview'
       }
     end
 
@@ -432,7 +442,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         name: 'eastus-embed',
         azure_foundry_endpoint: 'https://eastus-prod.services.ai.azure.com',
         azure_foundry_api_key: 'ak-azure-eastus-prod-001',
-        azure_foundry_surface: :model_inference
+        azure_foundry_surface: :model_inference, azure_foundry_api_version: '2024-05-01-preview'
       }
     end
     let(:embed_offering) { ssot_harness.build_offering_drafts(instance_config: embed_config, tier: :cloud).first }
@@ -688,17 +698,13 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
   # --- Quota domain ---
 
   describe 'quota domain safety' do
-    it 'declares deployment-scoped quota_domains on offerings' do
+    it 'does not invent shared quota domains from deployment names' do
       config = ssot_harness.instance_configs[0]
       callable = ssot_harness.build_callable(instance_config: config)
       drafts = ssot_harness.build_offering_drafts(instance_config: config, callable: callable, tier: :cloud)
 
       drafts.each do |draft|
-        expect(draft.quota_domains).not_to be_empty,
-                                           'Azure Foundry offerings must declare deployment-scoped quota_domains'
-        draft.quota_domains.each_value do |domain|
-          expect(domain).to match(/\Aazure:deployment:/)
-        end
+        expect(draft.quota_domains).to be_empty
       end
     end
   end
@@ -936,7 +942,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
         block_capturing = Class.new do
           include AzureFoundrySpecEnforcement
 
-          define_method(:stream) do |_messages, **, &block|
+          define_method(:stream_chat) do |_messages, **, &block|
             block.call({ delta: 'chunk' })
           end
         end.new

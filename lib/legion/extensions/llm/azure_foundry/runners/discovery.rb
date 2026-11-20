@@ -28,20 +28,25 @@ module Legion
               if credential_string?(instance_cfg[:azure_foundry_project_endpoint])
                 return fetch_project_deployments(instance_cfg: instance_cfg)
               end
+              if surface_for(instance_cfg) == :openai_v1
+                raise Legion::Extensions::Llm::ConfigurationError,
+                      'OpenAI v1 deployment discovery requires provider.project_endpoint'
+              end
 
               response = catalog_response(instance_cfg: instance_cfg)
-              raise CatalogFetchFailure, "catalog fetch returned HTTP #{response.status}" unless response.status == 200
+              unless response.status == 200
+                raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure,
+                      "catalog fetch returned HTTP #{response.status}"
+              end
 
-              Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_entries(
-                body: catalog_body(response), surface: surface_for(instance_cfg)
-              )
+              Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_info(body: catalog_body(response))
             rescue Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
                    Legion::JSON::ParseError => e
-              raise CatalogFetchFailure, e.message, cause: e
+              raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, e.message, cause: e
             end
 
             def model_id_from(model_data)
-              Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(model_data).to_s
+              model_data.fetch(:deployment_name)
             end
 
             # Readiness checks data-plane authentication, not generation. It
@@ -67,9 +72,9 @@ module Legion
             end
 
             def build_offering_draft(instance_cfg:, instance_key:, model_id:, model_data:, **)
-              tier = instance_cfg.fetch(:tier, Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance][:tier])
+              tier = instance_cfg.fetch(:tier)
               operations = build_operation_evidence(entry: model_data)
-              base_name = Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.base_model_name_for(model_data)
+              base_name = model_data[:model_name]
               Legion::Extensions::Llm::Inventory::OfferingDraft.new(
                 provider_native_key: model_id, model: model_id, tier: tier,
                 operation_evidence: operations,
@@ -77,10 +82,10 @@ module Legion
                 context_evidence: build_context_evidence(entry: model_data),
                 max_output_evidence: build_max_output_evidence(entry: model_data),
                 embedding_dimensions_evidence: absent_value_evidence,
-                model_revision_evidence: value_evidence(model_data[:model_revision] || model_data['model_revision']),
+                model_revision_evidence: value_evidence(model_data[:model_revision]),
                 tokenizer_evidence: absent_value_evidence,
-                quota_domains: build_quota_domains(model_id: model_id),
-                metadata: build_offering_metadata(model_id: model_id, base_name: base_name, instance_key: instance_key),
+                metadata: build_offering_metadata(base_name: base_name, instance_key: instance_key,
+                                                  publisher: model_data[:model_publisher]),
                 publication_source: :provider_catalog
               )
             end

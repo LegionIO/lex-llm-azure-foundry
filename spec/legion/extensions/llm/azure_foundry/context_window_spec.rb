@@ -12,8 +12,7 @@ require 'legion/extensions/llm/azure_foundry/runners/discovery'
 # Architecture (07 C1-C5): each discovered model is published through the
 # discovery runner's writer path, which carries the context window as
 # context_evidence (ValueEvidence). The value flows from the live model
-# catalog when the entry reports it (context_window / max_input_tokens /
-# context_length). Missing provider evidence remains unknown; an instance
+# catalog when the entry reports context_window. Missing provider evidence remains unknown; an instance
 # permission cannot become a provider fact or a hardcoded guess.
 RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' do
   # The production writer seam: the discovery runner's own draft builder with
@@ -24,12 +23,13 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
       provider_family: :azure_foundry, instance_id: 'context-window-spec'
     )
     cfg = {
+      tier: :cloud,
       azure_foundry_endpoint: 'https://ctx.example.services.ai.azure.com',
       azure_foundry_api_key: 'ak-ctx-spec'
     }.merge(instance_cfg)
     drafts = entries.filter_map do |entry|
       runner.send(:build_offering_draft, instance_cfg: cfg, instance_key: key,
-                                         model_id: Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser.model_id_for(entry),
+                                         model_id: entry.fetch(:deployment_name),
                                          model_data: entry)
     end
     drafts.find { |draft| draft.model == model_id }
@@ -37,8 +37,8 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
 
   context 'when the catalog entry reports an explicit context_window' do
     let(:entries) do
-      [{ 'id' => 'gpt-4o-prod', 'model_name' => 'gpt-4o',
-         'context_window' => 128_000, 'max_output_tokens' => 16_384 }]
+      [{ deployment_name: 'gpt-4o-prod', model_name: 'gpt-4o',
+         context_window: 128_000, max_output_tokens: 16_384 }]
     end
 
     it 'flows context_window into the context evidence (not just metadata)' do
@@ -58,17 +58,17 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
   end
 
   context 'when the catalog entry reports max_input_tokens instead' do
-    it 'derives a known context window from max_input_tokens' do
-      draft = draft_for_model('custom-llama', [{ 'id' => 'custom-llama', 'max_input_tokens' => 32_768 }])
+    it 'does not infer a total context window from an input-only limit' do
+      draft = draft_for_model('custom-llama', [{ deployment_name: 'custom-llama', max_input_tokens: 32_768 }])
 
-      expect(draft.context_evidence.status).to eq(:known)
-      expect(draft.context_evidence.value).to eq(32_768)
+      expect(draft.context_evidence.status).to eq(:unknown)
+      expect(draft.context_evidence.value).to be_nil
     end
   end
 
   context 'when the catalog entry reports no context info' do
     it 'does not promote an instance permission to authoritative context evidence' do
-      draft = draft_for_model('private-mystery-model', [{ 'id' => 'private-mystery-model' }],
+      draft = draft_for_model('private-mystery-model', [{ deployment_name: 'private-mystery-model' }],
                               instance_cfg: { context_window: 64_000 })
 
       expect(draft.context_evidence.status).to eq(:unknown)
@@ -76,7 +76,7 @@ RSpec.describe 'Legion::Extensions::Llm::AzureFoundry context window evidence' d
     end
 
     it 'leaves the context window unknown rather than guessing from a hardcoded table' do
-      draft = draft_for_model('private-mystery-model', [{ 'id' => 'private-mystery-model' }])
+      draft = draft_for_model('private-mystery-model', [{ deployment_name: 'private-mystery-model' }])
 
       expect(draft.context_evidence.status).to eq(:unknown)
       expect(draft.context_evidence.value).to be_nil

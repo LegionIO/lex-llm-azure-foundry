@@ -12,10 +12,11 @@ module Legion
             },
             instance: {
               endpoint: nil, tier: :cloud, transport: :http,
-              credentials: { api_key: nil, bearer_token: nil, project_bearer_token: nil },
+              credentials: { api_key: nil, bearer_token: nil, broker: nil,
+                             project_bearer_token: nil, project_broker: nil },
               provider: {
                 api_version: '2024-05-01-preview', surface: :model_inference,
-                project_endpoint: nil, project_api_version: 'v1'
+                project_endpoint: nil, project_api_version: 'v1', project_connection_name: nil
               },
               usage: { inference: true, embedding: true, image: false },
               limits: { concurrency: 4 },

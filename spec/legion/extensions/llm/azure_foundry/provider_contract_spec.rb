@@ -11,7 +11,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
   # The 0.8.0 base funnel and the fleet callable contract take the canonical
   # message array positionally (kit B1: chat(messages, model:, ...)); the gem's
   # entries keep that one form and take everything else as keywords.
-  def canonical_methods = %i[chat stream embed count_tokens]
+  def canonical_methods = %i[chat stream_chat embed count_tokens]
 
   def expect_dispatch_shape(method_name)
     params = described_class.instance_method(method_name).parameters
@@ -21,6 +21,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
   end
 
   def positional_messages(method_name)
-    %i[chat stream].include?(method_name) ? [:messages] : []
+    %i[chat stream_chat].include?(method_name) ? [:messages] : []
   end
 end
