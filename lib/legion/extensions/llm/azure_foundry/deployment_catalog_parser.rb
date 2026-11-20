@@ -17,7 +17,7 @@ module Legion
                     'Azure project deployment response must contain a value array'
             end
 
-            { entries: values.map { |entry| normalize_entry(entry: entry) }, next_link: next_link(body: body) }
+            { entries: values.filter_map { |entry| normalize_entry(entry: entry) }, next_link: next_link(body: body) }
           end
 
           def normalize_entry(entry:, **)
@@ -27,9 +27,22 @@ module Legion
               raise Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
                     'Azure project response contains an invalid model deployment'
             end
+            return if connected_resource?(entry: entry)
 
             entry.merge(deployment_name: parser.lookup(entry, [:name]), model_name: parser.lookup(entry, [:modelName]),
                         model_revision: parser.lookup(entry, [:modelVersion]))
+          end
+
+          def connected_resource?(entry:, **)
+            connection = entry.key?(:connectionName) ? entry[:connectionName] : entry['connectionName']
+            unless connection.nil? || connection.is_a?(String)
+              raise Legion::Extensions::Llm::AzureFoundry::ModelCatalogParser::InvalidCatalog,
+                    'Azure deployment connectionName must be a string or null'
+            end
+
+            # A connected resource has its own endpoint and credentials. Its
+            # deployments are not evidence for this instance's native endpoint.
+            connection.is_a?(String) && !connection.strip.empty?
           end
 
           def next_link(body:, **)

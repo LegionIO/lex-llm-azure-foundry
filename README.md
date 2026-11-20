@@ -46,10 +46,17 @@ themselves prove that matching deployments exist. Inference requests need the
 
 For OpenAI v1 resources, configure the Foundry project endpoint and its
 project-scoped bearer credential. Discovery reads
-`GET <project_endpoint>/deployments?api-version=v1` and publishes each deployment's
-`name`. The publisher-specific model name is metadata, not dispatch identity.
+`GET <project_endpoint>/deployments?api-version=v1` and publishes each project-native
+deployment's `name`. The publisher-specific model name is metadata, not dispatch identity.
 A gateway catalog that explicitly supplies `deployment_name` can also be read;
 bare base-model entries are rejected.
+
+This discovery source supports only project-native deployments. Records with a
+nonempty `connectionName` belong to connected resources and are excluded before
+publication and duplicate checking. Their endpoint and credentials are not inferred
+or reused. A catalog containing only connected-resource deployments publishes an
+empty native snapshot. Configure connected resources separately using their own
+deployment inventory and credentials.
 
 Project discovery uses its own bearer credential with the
 `https://ai.azure.com/.default` scope. The resource API key and resource bearer

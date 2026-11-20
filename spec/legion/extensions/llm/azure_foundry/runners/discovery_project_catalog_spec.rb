@@ -152,4 +152,54 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     expect { runner.fetch_raw_models(instance_cfg: config) }
       .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /conflicting/)
   end
+
+  it 'publishes only project-native deployments from a mixed project catalog' do
+    connected = deployment.merge(name: 'connected-chat', connectionName: 'connected-resource')
+    stubs.get(deployment_url) { response(value: [connected, deployment.merge(connectionName: nil)]) }
+    stubs.get(resource_url) { response(data: []) }
+
+    runner.refresh
+
+    expect(registry.snapshot.each_lane.map(&:model)).to eq(['production-chat'])
+    stubs.verify_stubbed_calls
+  end
+
+  it 'replaces the native snapshot with an empty one when only connected-resource deployments remain' do
+    entries = [deployment]
+    stubs.get(deployment_url) { response(value: entries) }
+    stubs.get(resource_url) { response(data: []) }
+    runner.refresh
+    expect(registry.snapshot.each_lane.map(&:model)).to eq(['production-chat'])
+
+    entries = [deployment.merge(connectionName: 'connected-resource')]
+    runner.refresh
+
+    key = Legion::Extensions::Llm::Inventory::Identity::InstanceKey.new(provider_family: :azure_foundry,
+                                                                        instance_id: 'primary')
+    expect(registry.snapshot.publication_status(instance_key: key).state).to eq(:complete)
+    expect(registry.snapshot.each_lane.to_a).to be_empty
+    stubs.verify_stubbed_calls
+  end
+
+  it 'does not let a connected deployment conflict with a native deployment of the same name' do
+    connected = deployment.merge(connectionName: 'connected-resource',
+                                 capabilities: { chat_completion: false, embeddings: true })
+    stubs.get(deployment_url) { response(value: [connected, deployment]) }
+    stubs.get(resource_url) { response(data: []) }
+
+    runner.refresh
+
+    offering = runner.states.fetch('primary')[:offerings].first
+    expect(registry.snapshot.each_lane.map(&:model)).to eq(['production-chat'])
+    expect(offering.operation_evidence[:chat].status).to eq(:supported)
+    expect(offering.operation_evidence[:embed].status).to eq(:unsupported)
+    stubs.verify_stubbed_calls
+  end
+
+  it 'rejects an invalid connection identity rather than treating it as project-native' do
+    stubs.get(deployment_url) { response(value: [deployment.merge(connectionName: false)]) }
+
+    expect { runner.fetch_raw_models(instance_cfg: config) }
+      .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /connectionName/)
+  end
 end

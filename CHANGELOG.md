@@ -5,6 +5,7 @@
 ### Fixed
 - Keep the shared `lex-llm` discovery lifecycle and registry as the sole inventory owner. Azure resource model catalogs no longer become deployed offerings merely because their catalog GET succeeds.
 - Discover deployed model names through the Foundry project deployment API, including bounded pagination, distinct project authentication, and retention of the last good snapshot after malformed or partial responses.
+- Publish only project-native deployments from project discovery. Exclude records with a nonempty `connectionName` before duplicate checking so connected-resource models are not advertised on the native endpoint; reject malformed connection identities. Cover mixed catalogs, connected-only replacement, and shared deployment names through the real publisher.
 - Accept the documented single-model `/models/info` response and share endpoint normalization between discovery and inference, including endpoints already ending in `/models`.
 - Publish explicit operation and capability evidence. Missing facts remain unknown; model-name guesses and operator limits no longer masquerade as provider evidence.
 - Preserve distinct deployments of a shared base model, deduplicate identical records, and reject contradictory duplicate records instead of silently choosing capabilities.
