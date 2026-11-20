@@ -23,7 +23,7 @@ module Legion
             %i[
               azure_foundry_endpoint azure_foundry_api_key azure_foundry_bearer_token
               azure_foundry_api_version azure_foundry_surface azure_foundry_project_endpoint
-              azure_foundry_project_api_version azure_foundry_project_bearer_token
+              azure_foundry_project_api_version azure_foundry_project_api_key azure_foundry_project_bearer_token
               azure_foundry_broker azure_foundry_project_broker azure_foundry_project_connection_name
             ]
           end

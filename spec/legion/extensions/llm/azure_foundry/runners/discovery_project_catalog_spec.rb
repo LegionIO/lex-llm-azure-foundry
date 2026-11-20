@@ -211,6 +211,128 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /connectionName/)
   end
 
+  context 'with an explicit project API key' do
+    before do
+      credentials = tree[:instances][:primary][:credentials]
+      credentials.delete(:project_bearer_token)
+      credentials[:project_api_key] = 'project-key'
+    end
+
+    %i[api_key bearer_token].each do |resource_auth|
+      it "publishes connected deployments with isolated project-key and resource #{resource_auth} authentication" do
+        credentials = tree[:instances][:primary][:credentials]
+        credentials.delete(:api_key)
+        credentials[resource_auth] = 'resource-credential'
+        tree[:instances][:primary][:provider][:project_connection_name] = 'remote'
+        connected = deployment.merge(connectionName: 'remote')
+        stubs.get(deployment_url) do |env|
+          expect_project_key(env)
+          response(value: [connected], nextLink: "#{deployment_url}&skip=1")
+        end
+        stubs.get("#{deployment_url}&skip=1") do |env|
+          expect_project_key(env)
+          response(value: [connected.merge(name: 'secondary-chat')])
+        end
+        stubs.get("#{project_url}/connections/remote?api-version=v1") do |env|
+          expect_project_key(env)
+          response(name: 'remote', type: 'AzureOpenAI', target: 'https://resource.example')
+        end
+        stubs.get(resource_url) do |env|
+          expect_resource_credential(env, resource_auth: resource_auth)
+          response(data: [])
+        end
+
+        runner.refresh
+
+        expect(registry.snapshot.each_lane.map(&:model)).to contain_exactly('production-chat', 'secondary-chat')
+        provider = runner.states.fetch('primary')[:callable]
+        expect(provider).to be_an_instance_of(Legion::Extensions::Llm::AzureFoundry::Provider)
+        expect(provider.config.azure_foundry_project_api_key).to eq('project-key')
+        expect(provider.class.configuration_options).to include(:azure_foundry_project_api_key)
+        provider.connection.connection.adapter(:test, stubs)
+        stubs.post('https://resource.example/openai/v1/chat/completions') do |env|
+          expect_resource_credential(env, resource_auth: resource_auth)
+          response(model: 'production-chat',
+                   choices: [{ message: { role: 'assistant', content: 'ok' },
+                               finish_reason: 'stop' }])
+        end
+
+        result = provider.chat([Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'Hello')],
+                               model: 'production-chat')
+
+        expect(result.text).to eq('ok')
+        stubs.verify_stubbed_calls
+      end
+    end
+
+    {
+      project_bearer_token: 'project-token',
+      project_broker: { provider: :entra_delegated, qualifier: :foundry_project }
+    }.each do |other_source, value|
+      it "rejects an API key combined with #{other_source} before sending a request" do
+        tree[:instances][:primary][:credentials][other_source] = value
+
+        expect { runner.fetch_raw_models(instance_cfg: config) }
+          .to raise_error(Legion::Extensions::Llm::ConfigurationError, /exactly one/)
+      end
+    end
+
+    it 'rejects a malformed project key through the existing credential validator' do
+      tree[:instances][:primary][:credentials][:project_api_key] = 42
+
+      expect { runner.fetch_raw_models(instance_cfg: config) }
+        .to raise_error(Legion::Extensions::Llm::ConfigurationError, /credentials must be strings/)
+    end
+
+    it 'retains the last complete snapshot after a project network-policy rejection' do
+      denied = false
+      stubs.get(deployment_url) do |env|
+        expect_project_key(env)
+        if denied
+          response(status: 403, error: { code: '403', message: 'A Virtual Network is configured for this resource.' })
+        else
+          response(value: [deployment])
+        end
+      end
+      stubs.get(resource_url) { response(data: []) }
+      runner.refresh
+      previous = registry.snapshot.each_lane.map(&:lane_id)
+      expect(previous).not_to be_empty
+
+      denied = true
+      runner.refresh
+
+      expect(registry.snapshot.each_lane.map(&:lane_id)).to eq(previous)
+      expect(runner.states.fetch('primary')[:sequence]).to eq(0)
+      stubs.verify_stubbed_calls
+    end
+
+    it 'rejects off-origin pagination before forwarding the project key' do
+      stubs.get(deployment_url) do |env|
+        expect_project_key(env)
+        response(value: [deployment], nextLink: 'https://other.example/deployments')
+      end
+
+      expect { runner.fetch_raw_models(instance_cfg: config) }
+        .to raise_error(Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure, /same project/)
+      stubs.verify_stubbed_calls
+    end
+
+    def expect_project_key(env)
+      expect(env.request_headers['api-key']).to eq('project-key')
+      expect(env.request_headers).not_to have_key('Authorization')
+    end
+
+    def expect_resource_credential(env, resource_auth:)
+      expected = if resource_auth == :api_key
+                   { 'api-key' => 'resource-credential' }
+                 else
+                   { 'Authorization' => 'Bearer resource-credential' }
+                 end
+      expect(env.request_headers.slice('api-key', 'Authorization')).to eq(expected)
+    end
+  end
+
   context 'with an explicitly configured connected resource' do
     let(:resource_url) { 'https://connected.example/openai/v1/models' }
     let(:connection_url) { "#{project_url}/connections/remote?api-version=v1" }

@@ -51,7 +51,7 @@ themselves prove that matching deployments exist. Inference requests need the
 `DeploymentNotFound` even when catalog authentication succeeds.
 
 For OpenAI v1 resources, configure the Foundry project endpoint and its
-project-scoped credential or broker reference. Discovery reads
+explicit project credential or broker reference. Discovery reads
 `GET <project_endpoint>/deployments?api-version=v1` and publishes the selected
 deployment's `name`. The publisher-specific model name is metadata, not dispatch identity.
 OpenAI v1 discovery requires this project source. There is no resource model-list
@@ -70,13 +70,28 @@ offerings. A transport/authentication/malformed-response failure retains the las
 complete snapshot under the shared lifecycle. No credentials are fetched from
 project connection metadata or forwarded between resource instances.
 
-Project discovery uses its own bearer credential with the
-`https://ai.azure.com/.default` scope. The resource API key and resource bearer
-token are never forwarded to the project endpoint.
+Project discovery requires exactly one explicit credential: `project_api_key`,
+`project_bearer_token`, or `project_broker`. A project API key is sent in the
+`api-key` header and must belong to the resource hosting that project. Project
+bearer tokens require the `https://ai.azure.com/.default` scope. Resource
+credentials are never implicitly reused for project discovery, and project
+credentials are never forwarded to resource inference or readiness requests.
+
+Microsoft's [REST authentication overview](https://ai.azure.com/api-reference)
+documents both API keys and bearer tokens for project requests. Its
+[versioned project specification](https://github.com/Azure/azure-rest-api-specs/blob/main/specification/ai/data-plane/AIProjects/stable/v1/azure-ai-projects.json)
+declares OAuth, while the
+[Python project SDK](https://github.com/Azure/azure-sdk-for-python/blob/main/sdk/ai/azure-ai-projects/README.md)
+supports Entra authentication only. This adapter uses REST and accepts an explicit
+project API key; successful deployment discovery must still be verified against
+the configured endpoint. A VNet/network-policy rejection is a failed refresh,
+not a successful authentication check or an empty deployment catalog. The adapter
+retains the last complete snapshot and does not rewrite hosts or bypass network policy.
 
 `credentials.broker` and `credentials.project_broker` accept explicit
 `provider` / `qualifier` references to the existing `Legion::Identity::Broker`.
-The broker owns credential acquisition and renewal. Azure reads its current valid
+Identity issuers acquire scoped credentials; the host broker owns registered leases
+and their renewal. Azure reads the current valid
 lease for every inference request, readiness check, project page, and connection
 lookup. It keeps no token cache or renewal worker. Missing/expired leases fail
 authentication; the adapter never substitutes a default Graph credential.
@@ -89,9 +104,8 @@ references select existing scoped leases; they do not request OAuth consent or
 mint new scopes. Broker mode requires the LegionIO identity runtime. Static
 API-key/bearer operation remains available without loading that host service.
 The resource configures exactly one credential source: API key, bearer token, or
-broker reference. Project discovery uses either a project bearer token or a
-project broker reference; it does not accept resource API keys.
-Ambiguous combinations are rejected; a failed source is never
+broker reference. Project discovery independently configures its API key, bearer
+token, or broker reference. Ambiguous combinations are rejected; a failed source is never
 replaced by another credential source.
 
 Example settings under `extensions.llm.azure_foundry`:
@@ -103,7 +117,7 @@ instances:
     tier: cloud
     credentials:
       api_key: <resource-api-key>
-      project_bearer_token: <project-scoped-bearer-token>
+      project_api_key: <project-resource-api-key>
     provider:
       surface: openai_v1
       project_endpoint: https://resource.example.services.ai.azure.com/api/projects/primary
@@ -207,6 +221,7 @@ standard provider `default_settings` contract.
 | `instances.default.provider.surface` | `model_inference` |
 | `instances.default.provider.api_version` | `2024-05-01-preview` |
 | `instances.default.provider.project_api_version` | `v1` |
+| `instances.default.credentials.project_api_key` | `nil` |
 
 ## Verification
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.5] - 2026-11-20
+
+### Fixed
+- Support an explicitly configured `credentials.project_api_key` for project deployment pages and connected-resource metadata lookup through the existing authentication and discovery pipeline.
+- Keep project credentials isolated from resource inference/readiness credentials. Reject ambiguous project API-key, bearer-token, and broker combinations without falling back to another source.
+- Verify real inventory publication, project-key pagination and connection lookup, resource credential isolation, malformed credentials, off-origin continuation rejection, and last-good snapshot retention after a project network-policy failure.
+
 ## [0.4.4] - 2026-11-20
 
 ### Fixed

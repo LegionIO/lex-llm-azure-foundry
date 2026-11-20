@@ -19,7 +19,7 @@ module Legion
 
         PROVIDER_FAMILY = :azure_foundry
         PROVIDER_KEYS = %i[api_version surface project_endpoint project_api_version project_connection_name].freeze
-        CREDENTIAL_KEYS = %i[api_key bearer_token broker project_bearer_token project_broker].freeze
+        CREDENTIAL_KEYS = %i[api_key bearer_token broker project_api_key project_bearer_token project_broker].freeze
         LEGACY_KEYS = %i[base_url api_base api_key bearer_token api_version surface].freeze
 
         def self.default_settings

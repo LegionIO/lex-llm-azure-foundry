@@ -30,17 +30,20 @@ module Legion
             end
 
             def project_connection(instance_cfg:, endpoint:)
+              key = instance_cfg[:azure_foundry_project_api_key]
               token = instance_cfg[:azure_foundry_project_bearer_token]
               broker = instance_cfg[:azure_foundry_project_broker]
-              unless Legion::Extensions::Llm::AzureFoundry::Authentication.configured?(bearer_token: token,
-                                                                                       broker: broker)
+              unless Legion::Extensions::Llm::AzureFoundry::Authentication.configured?(
+                api_key: key, bearer_token: token, broker: broker
+              )
                 raise Legion::Extensions::Llm::Discovery::Pipeline::CatalogFetchFailure,
-                      'Azure project discovery requires credentials.project_bearer_token or project_broker ' \
-                      'for the ai.azure.com scope'
+                      'Azure project discovery requires credentials.project_api_key, ' \
+                      'project_bearer_token, or project_broker'
               end
 
               config = instance_cfg.except(:azure_foundry_api_key, :azure_foundry_bearer_token, :azure_foundry_broker)
-                                   .merge(azure_foundry_bearer_token: token, azure_foundry_broker: broker)
+                                   .merge(azure_foundry_api_key: key, azure_foundry_bearer_token: token,
+                                          azure_foundry_broker: broker)
               limits = settings[:discovery]
               build_connection(base_url: endpoint, instance_cfg: config,
                                timeout: limits[:request_timeout], open_timeout: limits[:open_timeout])
