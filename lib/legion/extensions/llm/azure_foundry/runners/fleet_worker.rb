@@ -20,12 +20,9 @@ module Legion
             module_function
 
             def handle_fleet_request(**opts)
-              # L6: the responder's dead provider_class/provider_instances
-              # params are gone from the 0.8.0 core — v3 dispatch is
-              # exact-only and never constructs a provider here.
               Legion::Extensions::Llm::Fleet::ProviderResponder.call(
                 payload: opts,
-                provider_family: AzureFoundry::PROVIDER_FAMILY,
+                provider_family: Legion::Extensions::Llm::AzureFoundry::PROVIDER_FAMILY,
                 delivery: opts[:delivery],
                 properties: opts[:properties]
               )

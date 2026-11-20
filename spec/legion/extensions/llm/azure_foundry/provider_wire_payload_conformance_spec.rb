@@ -19,26 +19,19 @@ class AzureFoundryWireRequestStub
   attr_reader :options
 end
 
-# Real callable boundary (09 §5.1): the production Helpers::Callable +
-# production AzureFoundry::Provider traverse render_payload,
+# Real provider boundary (09 §5.1): AzureFoundry::Provider traverses render_payload,
 # parse_completion_response, and stream_response; only the HTTP connection is
 # stubbed (sync bodies and SSE events at the wire edge).
-RSpec.describe Legion::Extensions::Llm::AzureFoundry::Helpers::Callable do
+RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
   let(:instance_cfg) do
     { azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
       azure_foundry_api_key: 'ak-wire-spec', azure_foundry_surface: :model_inference,
       azure_foundry_api_version: '2024-05-01-preview' }
   end
   let(:provider) do
-    Legion::Extensions::Llm::AzureFoundry::Provider.new(
-      azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
-      azure_foundry_api_key: 'ak-wire-spec',
-      azure_foundry_surface: :model_inference, azure_foundry_api_version: '2024-05-01-preview'
-    )
+    described_class.new(instance_cfg)
   end
-  let(:callable) do
-    described_class.new(instance_cfg: instance_cfg, logger: Logger.new(File::NULL), provider:)
-  end
+  let(:callable) { provider }
   let(:captured) { {} }
 
   before { stub_wire_edge }
@@ -61,17 +54,6 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Helpers::Callable do
       )
       expect(captured[:headers]).to include('X-Request-Probe' => 'kept')
     end
-  end
-
-  it 'rehydrates serialized fleet params through the shared canonical constructor' do
-    messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')]
-    params = { temperature: 0.3, max_tokens: 512, response_format: { type: 'json_object' } }
-
-    callable.chat(messages, model: 'deployment', params: params)
-
-    expect(captured[:payload]).to include(temperature: 0.3, max_tokens: 512,
-                                          response_format: { type: 'json_object' })
-    expect(captured[:payload]).not_to have_key(:params)
   end
 
   it 'does not interpret flat sampling kwargs as an alternate parameter contract' do

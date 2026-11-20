@@ -135,33 +135,33 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
     end
     runner.refresh
     original = runner.states.fetch('primary')[:callable]
-    expect(original.provider.headers['Authorization']).to eq('Bearer first-resource-token')
+    expect(original.headers['Authorization']).to eq('Bearer first-resource-token')
 
     register_token(token: 'renewed-resource-token')
     runner.refresh
 
     expect(runner.states.fetch('primary')[:callable]).to equal(original)
-    expect(original.provider.headers['Authorization']).to eq('Bearer renewed-resource-token')
+    expect(original.headers['Authorization']).to eq('Bearer renewed-resource-token')
     expect(seen).to include('Bearer first-resource-token', 'Bearer renewed-resource-token')
 
     register_token(token: 'different-source-token', qualifier: :'second-resource')
     tree[:instances][:primary][:credentials][:broker][:qualifier] = 'second-resource'
-    expect(original.provider.headers['Authorization']).to eq('Bearer renewed-resource-token')
+    expect(original.headers['Authorization']).to eq('Bearer renewed-resource-token')
     runner.refresh
 
     replacement = runner.states.fetch('primary')[:callable]
     expect(replacement).not_to equal(original)
-    expect(replacement.provider.headers['Authorization']).to eq('Bearer different-source-token')
+    expect(replacement.headers['Authorization']).to eq('Bearer different-source-token')
 
     static = +'static-one'
     tree[:instances][:primary][:credentials].delete(:broker)
     tree[:instances][:primary][:credentials][:bearer_token] = static
     runner.refresh
-    static_provider = runner.states.fetch('primary')[:callable].provider
+    static_provider = runner.states.fetch('primary')[:callable]
     static.replace('static-two')
     expect(static_provider.headers['Authorization']).to eq('Bearer static-one')
     runner.refresh
-    expect(runner.states.fetch('primary')[:callable].provider.headers['Authorization']).to eq('Bearer static-two')
+    expect(runner.states.fetch('primary')[:callable].headers['Authorization']).to eq('Bearer static-two')
   end
 
   it 'requires an explicit broker qualifier and never selects a default implicitly' do

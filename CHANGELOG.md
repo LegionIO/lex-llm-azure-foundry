@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.4] - 2026-11-20
+
+### Fixed
+- Register the actual Azure provider instance as the inventory callable. Delete the redundant callable wrapper, duplicate dispatch checks, lazy provider construction, and separate disconnect state; execution and connection disposal use the shared provider directly.
+- Carry the configured instance name into that provider so registry reads and health attribution use the claimed instance instead of defaulting to `default`.
+- Refine shared error classification only when a structured Azure error code and matching HTTP status establish the outcome. Preserve authentication and authorization failures, and stop treating generic 404s or error-message phrases as deployment or endpoint-health facts.
+- Require `lex-llm >= 0.8.9` for canonical tools, thinking, and sampling parameters to be reconstructed at the shared fleet boundary. Remove Azure-specific parameter reconstruction.
+- Load actors through the standard host actor loader. Remove guarded fleet requires, the unused chat URL alias and authentication hook, and unqualified fleet references.
+- Replace fake actor/runtime and provider dispatch classes in specs with real host classes and real provider execution over controlled HTTP transport. Require the shared conformance kit without an optional-load guard.
+
 ## [0.4.3] - 2026-11-20
 
 ### Fixed

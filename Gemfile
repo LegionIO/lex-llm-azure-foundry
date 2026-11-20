@@ -20,10 +20,8 @@ group :test do
   legionio_options = File.directory?(legionio_path) ? { path: legionio_path } : {}
   gem 'legionio', **legionio_options
 
-  # The published lex-llm (>= 0.8.0, declared in the gemspec) provides the
-  # WeightSchema/WeightReconciler and Canonical types these specs require.
-  # Use the local checkout when present (development); CI resolves the
-  # published gem via the gemspec dependency.
-  lex_llm_path = File.expand_path('../lex-llm', __dir__)
+  # Use the standard immutable CI companion or adjacent development checkout.
+  lex_llm_path = File.expand_path('.ci-dependencies/lex-llm', __dir__)
+  lex_llm_path = File.expand_path('../lex-llm', __dir__) unless Dir.exist?(lex_llm_path)
   gem 'lex-llm', path: lex_llm_path if Dir.exist?(lex_llm_path)
 end

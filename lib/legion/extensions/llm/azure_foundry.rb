@@ -7,8 +7,6 @@ require 'legion/extensions/llm/azure_foundry/authentication'
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/provider'
 require 'legion/extensions/llm/azure_foundry/version'
-require 'legion/extensions/llm/azure_foundry/helpers/callable'
-require 'legion/extensions/llm/azure_foundry/actors/discovery'
 
 module Legion
   module Extensions
@@ -39,7 +37,7 @@ module Legion
           settings.fetch(:instances).each_with_object({}) do |(name, config), instances|
             next if config[:enabled] == false
 
-            normalized = normalize_instance_config(config)
+            normalized = normalize_instance_config(config, name: name)
             next if normalized[:azure_foundry_endpoint].nil?
             next unless Legion::Extensions::Llm::AzureFoundry::Authentication.configured?(
               api_key: normalized[:azure_foundry_api_key], bearer_token: normalized[:azure_foundry_bearer_token],
@@ -50,7 +48,7 @@ module Legion
           end
         end
 
-        def self.normalize_instance_config(config)
+        def self.normalize_instance_config(config, name:)
           if config.keys.intersect?(LEGACY_KEYS)
             raise Legion::Extensions::Llm::ConfigurationError,
                   'Azure instances use endpoint, credentials, and provider fields'
@@ -60,6 +58,7 @@ module Legion
             Legion::Extensions::Llm::AzureFoundry::Settings::DEFAULT[:instance], config
           )
           normalized = instance.except(:endpoint, :credentials, :provider)
+          normalized[:instance_id] = name.to_s
           normalized[:azure_foundry_endpoint] = instance.fetch(:endpoint)
           project_instance_fields(normalized, instance.fetch(:provider), PROVIDER_KEYS)
           project_instance_fields(normalized, instance.fetch(:credentials), CREDENTIAL_KEYS)

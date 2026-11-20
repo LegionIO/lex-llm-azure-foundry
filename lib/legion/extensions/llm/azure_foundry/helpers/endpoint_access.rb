@@ -16,11 +16,6 @@ module Legion
             def catalog_base_url(instance_cfg:, **) = endpoint_for(instance_cfg: instance_cfg).base_url
             def catalog_path(instance_cfg:, **) = endpoint_for(instance_cfg: instance_cfg).catalog_path
 
-            def auth_token(instance_cfg:, **)
-              token = instance_cfg[:azure_foundry_api_key]
-              token if credential_string?(token)
-            end
-
             def apply_auth_headers(faraday:, instance_cfg:, **)
               Legion::Extensions::Llm::AzureFoundry::Authentication.install_discovery(
                 faraday: faraday, api_key: instance_cfg[:azure_foundry_api_key],

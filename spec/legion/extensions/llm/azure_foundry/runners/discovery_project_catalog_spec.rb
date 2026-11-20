@@ -75,7 +75,9 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       .to contain_exactly('production-chat', 'secondary-chat')
     expect(lanes.map { |lane| lane.metadata[:canonical_model_alias] }).to all(eq('base-model'))
     expect(lanes.map { |lane| lane.model_revision_evidence.value }).to all(eq('2026-01'))
-    provider = Legion::Extensions::Llm::AzureFoundry::Provider.new(config.merge(instance_id: 'primary'))
+    provider = runner.states.fetch('primary')[:callable]
+    expect(provider).to be_an_instance_of(Legion::Extensions::Llm::AzureFoundry::Provider)
+    expect(provider.provider_instance_id).to eq(:primary)
     expect(provider.discover_offerings.map(&:lane_id)).to match_array(lanes.map(&:lane_id))
     stubs.verify_stubbed_calls
   end
@@ -240,7 +242,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
       lanes = registry.snapshot.each_lane.to_a
       expect(lanes.map { |lane| [lane.instance_id, lane.model] }).to eq([%w[primary production-chat]])
       expect(lanes.first.metadata[:canonical_model_alias]).to eq('remote-base')
-      provider = runner.states.fetch('primary')[:callable].provider
+      provider = runner.states.fetch('primary')[:callable]
       provider.connection.connection.adapter(:test, stubs)
       stubs.post('https://connected.example/openai/v1/chat/completions') do |env|
         expect(env.request_headers['api-key']).to eq('connected-key')

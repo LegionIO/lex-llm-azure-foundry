@@ -44,7 +44,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
     Legion::Extensions::Llm.config.azure_foundry_endpoint = 'https://example.openai.azure.com'
 
     expect(provider.api_base).to eq('https://example.openai.azure.com/openai/v1')
-    expect([provider.chat_url, provider.embedding_url(model: 'text-embedding')])
+    expect([provider.completion_url, provider.embedding_url(model: 'text-embedding')])
       .to eq(['chat/completions', 'embeddings'])
   end
 
@@ -315,9 +315,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
       physical_id: runner.derive_physical_id(instance_cfg:)
     )
     publisher = Legion::Extensions::Llm::Inventory::Publisher.new(provider_family: :azure_foundry)
-    callable = Legion::Extensions::Llm::AzureFoundry::Helpers::Callable.new(
-      instance_cfg:, logger: Logger.new(File::NULL)
-    )
+    callable = Legion::Extensions::Llm::AzureFoundry::Provider.new(instance_cfg)
     coordinator = Legion::Extensions::Llm::Inventory::ProbeCoordinator.new(
       instance_key: key, enqueue: ->(**) { true }
     )
@@ -345,7 +343,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   def endpoint_helpers
     [
-      provider.chat_url,
+      provider.completion_url,
       provider.stream_url,
       provider.models_url,
       provider.embedding_url(model: 'embedding-prod'),
@@ -387,7 +385,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry do
 
   def composed_openai_v1_urls
     conn = Faraday.new(provider.api_base)
-    [provider.chat_url, provider.models_url, provider.embedding_url(model: 'text-embedding')]
+    [provider.completion_url, provider.models_url, provider.embedding_url(model: 'text-embedding')]
       .map { |path| conn.build_url(path).to_s }
   end
 

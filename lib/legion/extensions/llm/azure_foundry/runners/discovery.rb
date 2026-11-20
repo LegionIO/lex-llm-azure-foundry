@@ -3,7 +3,6 @@
 require 'legion/extensions/llm/discovery/pipeline'
 require 'legion/extensions/llm/azure_foundry/model_catalog_parser'
 require 'legion/extensions/llm/azure_foundry/helpers/offering_evidence'
-require 'legion/extensions/llm/azure_foundry/helpers/callable'
 require 'legion/extensions/llm/azure_foundry/helpers/project_catalog'
 require 'legion/extensions/llm/azure_foundry/helpers/endpoint_access'
 require 'legion/extensions/llm/azure_foundry/provider'
@@ -68,7 +67,7 @@ module Legion
             end
 
             def build_callable(instance_cfg:, **)
-              Legion::Extensions::Llm::AzureFoundry::Helpers::Callable.new(instance_cfg: instance_cfg, logger: log)
+              Legion::Extensions::Llm::AzureFoundry::Provider.new(instance_cfg)
             end
 
             def build_offering_draft(instance_cfg:, instance_key:, model_id:, model_data:, **)

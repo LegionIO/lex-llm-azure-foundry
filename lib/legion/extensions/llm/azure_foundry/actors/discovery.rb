@@ -2,10 +2,6 @@
 
 require 'legion/extensions/llm/discovery/actor'
 
-# The base discovery actor only exists inside the daemon (it inherits the
-# LegionIO time-based Every actor). In a standalone load, define nothing.
-return unless defined?(Legion::Extensions::Llm::Discovery::Actor)
-
 module Legion
   module Extensions
     module Llm

@@ -40,7 +40,6 @@ module Legion
           end
 
           def completion_url = azure_endpoint.path(operation: 'chat/completions')
-          def chat_url = completion_url
           def stream_url = completion_url
           def models_url = azure_endpoint.catalog_path
           def embedding_url(**) = azure_endpoint.path(operation: 'embeddings')
@@ -59,7 +58,48 @@ module Legion
             )
           end
 
+          # Only structured Azure evidence can refine the shared error kind.
+          def normalize_dispatch_error(error:)
+            outcome = super
+            return outcome unless %i[provider_error overloaded].include?(outcome.kind)
+
+            status, body = error_response(error: error)
+            kind = azure_error_kind(status: status, code: error_code(body: body))
+            kind ? outcome.with(kind: kind) : outcome
+          end
+
           private
+
+          def error_response(error:)
+            return [] unless error.is_a?(Legion::Extensions::Llm::Error) || error.is_a?(Faraday::Error)
+
+            response = error.response
+            case response
+            when Hash then [response[:status], response[:body]]
+            when Faraday::Response, Faraday::Env, Legion::Extensions::Llm::ErrorMiddleware::ResponseWithBody
+              [response.status, response.body]
+            else []
+            end
+          end
+
+          def error_code(body:)
+            body = Legion::JSON.load(body) if body.is_a?(String) && !body.empty?
+            return unless body.is_a?(Hash)
+
+            detail = Legion::Extensions::Llm::Utils.deep_symbolize_keys(body)[:error]
+            detail[:code] if detail.is_a?(Hash)
+          rescue Legion::JSON::ParseError => e
+            handle_exception(e, level: :warn, operation: 'azure_foundry.provider.error_code')
+            nil
+          end
+
+          def azure_error_kind(status:, code:)
+            case [status, code]
+            when [503, 'EndpointDeactivated'] then :instance_unavailable
+            when [503, 'ModelNotReady'] then :model_not_ready
+            when [404, 'DeploymentNotFound'] then :model_missing
+            end
+          end
 
           def azure_endpoint
             Legion::Extensions::Llm::AzureFoundry::Endpoint.new(

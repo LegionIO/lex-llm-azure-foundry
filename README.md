@@ -10,7 +10,7 @@ pipeline, and inventory registry.
 gem 'lex-llm-azure-foundry'
 ```
 
-Ruby 3.4+ and `lex-llm >= 0.8.0` are required. LegionIO loads the extension and
+Ruby 3.4+ and `lex-llm >= 0.8.9` are required. LegionIO loads the extension and
 runs its discovery actor. The adapter implements chat, streamed chat, and text
 embeddings; a model is eligible only when its published evidence supports the
 requested operation and capabilities.
@@ -32,6 +32,12 @@ lex-llm Discovery::Pipeline
 `AzureFoundry::Runners::Discovery` includes the shared pipeline and supplies only
 Azure protocol hooks and offering evidence. The shared pipeline owns instance
 reconciliation, probes, replacement, removal, weights, and health publication.
+The host actor builder loads the actor files; requiring the provider alone does
+not preload or conditionally define host actors.
+
+Discovery registers `AzureFoundry::Provider` itself as the callable. There is no
+Azure callable wrapper. The shared registry owns dispatch leases and retirement;
+the shared provider owns execution and connection disposal.
 
 `Provider#discover_offerings` reads activated lanes from that registry.
 It does not fetch Azure or maintain another catalog. Its inherited `live:`
@@ -161,8 +167,12 @@ ordinary broker token renewal does not replace the callable.
 - Deployment names do not establish quota sharing across resources. Without
   authoritative quota-domain evidence, offerings leave that mapping empty.
 - Provider execution inherits `chat`, `stream_chat`, `complete`, `embed`, `health`,
-  and `discover_offerings` from `lex-llm`. The callable packages canonical fields
-  for those methods; Azure has no second execution funnel or capability-name guesses.
+  and `discover_offerings` from `lex-llm`. The shared fleet worker reconstructs
+  serialized canonical controls before dispatch. Azure has no second execution
+  funnel, parameter-reconstruction path, or capability-name guesses.
+- Error normalization starts with the shared classifier. Azure refines only
+  structured error codes paired with their HTTP status; free-text phrases and
+  generic 404s cannot establish endpoint health or deployment existence.
 - Context and output limits come from valid positive integer catalog fields.
   No model-size lookup table supplies missing limits.
 - Deployment names remain distinct even when several deployments share one base
@@ -211,7 +221,9 @@ Specs exercise the shared SSOT conformance kit, real inventory publication,
 canonical callable payloads, documented model-info parsing, project pagination,
 authentication boundaries, failed-refresh retention, and explicit evidence.
 Broker tests load the real host broker, lease, and renewer from the test dependency.
-Only external HTTP transport and the token issuer are controlled fixtures.
+Actor tests load the actual host actors and helpers. Publication tests register
+actual provider instances; only external HTTP transport and token issuance are
+controlled fixtures.
 
 Microsoft references:
 [model-inference info](https://learn.microsoft.com/en-us/rest/api/microsoftfoundry/model-inference/get-model-info/get-model-info?view=rest-microsoftfoundry-model-inference-2024-05-01-preview),

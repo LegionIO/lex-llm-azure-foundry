@@ -3,23 +3,7 @@
 require 'legion/extensions/llm/azure_foundry'
 require 'legion/extensions/llm/fleet/provider_responder'
 require 'legion/extensions/llm/azure_foundry/runners/fleet_worker'
-
-unless defined?(Legion::Extensions::Actors::Subscription)
-  begin
-    require 'legion/extensions/actors/subscription'
-  rescue LoadError => e
-    Legion::Extensions::Llm::AzureFoundry.handle_exception(
-      e,
-      level: :warn,
-      handled: true,
-      operation: 'azure_foundry.fleet_worker.load_subscription'
-    )
-  end
-end
-
-unless defined?(Legion::Extensions::Actors::Subscription)
-  raise LoadError, 'LegionIO actor runtime is required for Azure Foundry fleet worker'
-end
+require 'legion/extensions/actors/subscription'
 
 module Legion
   module Extensions
@@ -45,7 +29,9 @@ module Legion
             end
 
             def enabled?
-              Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(AzureFoundry.discover_instances)
+              Legion::Extensions::Llm::Fleet::ProviderResponder.enabled_for?(
+                Legion::Extensions::Llm::AzureFoundry.discover_instances
+              )
             end
           end
         end
