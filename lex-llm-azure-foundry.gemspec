@@ -27,8 +27,6 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'legion-logging', '>= 1.3.2'
   spec.add_dependency 'legion-settings', '>= 1.4.2'
   spec.add_dependency 'legion-transport', '>= 1.4.14'
-  # 0.8.0 is the SSOT v4 contract cut: Canonical is the only internal
-  # language, the shared enforce_canonical_messages! boundary helper, and
-  # the Registry-snapshot offering read path this gem conforms to.
-  spec.add_dependency 'lex-llm', '>= 0.8.0'
+  # Shared canonical execution and protocol-specific output-token key hook.
+  spec.add_dependency 'lex-llm', '>= 0.8.11'
 end

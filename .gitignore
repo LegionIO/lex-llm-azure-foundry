@@ -1,4 +1,5 @@
 /.bundle/
+/.ci-dependencies/
 /coverage/
 /pkg/
 /tmp/

@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.4.8] - 2026-11-20
+
+### Fixed
+- Use the shared `output_token_limit_key` protocol hook to render OpenAI v1 output allowances as `max_completion_tokens`; keep model-inference allowances as `max_tokens`. Preserve the canonical budget unchanged, emit only one native key, and omit absent limits in buffered and streaming requests.
+- Publish documented GPT-5-mini 2025-08-07 GlobalStandard metadata: 400,000-token context, 128,000-token output allowance, and reasoning/tool/vision/streaming support. Explicit live facts retain precedence and unknown versions remain unknown.
+- Require `lex-llm >= 0.8.11` for the shared output-token key hook. Native reasoning effort values remain unchanged; unsupported effort values are not silently reduced.
+
+## [0.4.7] - 2026-11-20
+
+### Fixed
+- Publish documented unsupported thinking evidence for the exact GPT-4o-mini 2024-07-18 GlobalStandard and GPT-4.1 2025-04-14 GlobalStandard tuples, using `model_metadata` provenance instead of leaving their thinking capability unknown.
+- Preserve explicit live catalog capability precedence, including positive thinking evidence. Other models, versions, and deployment types remain unknown unless their own evidence establishes support.
+
+## [0.4.6] - 2026-11-20
+
+### Fixed
+- Replace unsupported project API-key discovery with explicit `model_info`, `project`, or `declared` discovery sources. Project discovery requires Entra bearer/broker authentication; there is no runtime fallback between sources.
+- Support API-key access through declared deployment identity bindings joined to exact authenticated resource model-catalog records. Publish only declared names through the shared inventory with `declared: true` metadata and `provider_static_catalog` provenance; reject missing/conflicting model records, duplicate names, and capability/limit overrides.
+- Preserve normal snapshot replacement, withdrawal, callable retirement, and last-good retention after failed observations. Readiness remains a non-inference catalog GET.
+- Withdraw an explicitly empty declaration set without fetching remote model facts, even during a catalog outage. Keep startup and cadence readiness checks unchanged.
+- Validate all catalog record identities, but check duplicate/conflicting records only for declared base-model IDs so unrelated catalog duplicates cannot block the selected deployments.
+- Add one immutable vendor metadata owner for exact GPT-4o-mini 2024-07-18 GlobalStandard and GPT-4.1 2025-04-14 GlobalStandard facts. Live catalog facts take precedence, including false capabilities; unknown tuples remain unknown.
+- Normalize observed project model version, SKU, and capability limit fields at the project parser boundary. Both project and declared sources select the same vendor metadata using one explicit tuple, while declared identity remains distinct from observed revision evidence.
+- Require `lex-llm >= 0.8.10` for shared OpenAI-compatible streaming finish-reason preservation; Azure adds no separate completion handling.
+
+## [0.4.5] - 2026-11-20
+
+### Fixed
+- Support an explicitly configured `credentials.project_api_key` for project deployment pages and connected-resource metadata lookup through the existing authentication and discovery pipeline.
+- Keep project credentials isolated from resource inference/readiness credentials. Reject ambiguous project API-key, bearer-token, and broker combinations without falling back to another source.
+- Verify real inventory publication, project-key pagination and connection lookup, resource credential isolation, malformed credentials, off-origin continuation rejection, and last-good snapshot retention after a project network-policy failure.
+
+## [0.4.4] - 2026-11-20
+
+### Fixed
+- Register the actual Azure provider instance as the inventory callable. Delete the redundant callable wrapper, duplicate dispatch checks, lazy provider construction, and separate disconnect state; execution and connection disposal use the shared provider directly.
+- Carry the configured instance name into that provider so registry reads and health attribution use the claimed instance instead of defaulting to `default`.
+- Refine shared error classification only when a structured Azure error code and matching HTTP status establish the outcome. Preserve authentication and authorization failures, and stop treating generic 404s or error-message phrases as deployment or endpoint-health facts.
+- Require `lex-llm >= 0.8.9` for canonical tools, thinking, and sampling parameters to be reconstructed at the shared fleet boundary. Remove Azure-specific parameter reconstruction.
+- Load actors through the standard host actor loader. Remove guarded fleet requires, the unused chat URL alias and authentication hook, and unqualified fleet references.
+- Replace fake actor/runtime and provider dispatch classes in specs with real host classes and real provider execution over controlled HTTP transport. Require the shared conformance kit without an optional-load guard.
+
+## [0.4.3] - 2026-11-20
+
+### Fixed
+- Keep the shared `lex-llm` discovery lifecycle and registry as the sole inventory owner. Azure resource model catalogs no longer become deployed offerings merely because their catalog GET succeeds.
+- Discover deployed model names through the Foundry project deployment API, including bounded pagination, distinct project authentication, and retention of the last good snapshot after malformed or partial responses.
+- Support native and connected-resource deployments through normal configured instances. Bind connected instances with `provider.project_connection_name`, verify the connection's endpoint, and filter before duplicate checking. Preserve deployment names across distinct instance/callable identities. Conclusive retargeting removes stale offerings; transport failures retain the last complete snapshot.
+- Resolve configured resource/project broker references through the real host identity broker on every provider call, page, connection lookup, and readiness request. Require one credential source per scope, reject unavailable/expired or unspecified leases, and leave token renewal to the existing broker.
+- Snapshot credential-reference bindings and include endpoint/auth-reference changes in the physical binding fingerprint, reclaiming captured callables on configuration changes while retaining them across broker lease renewal.
+- Accept the documented single-model `/models/info` response and share endpoint normalization between discovery and inference, including endpoints already ending in `/models`.
+- Publish explicit operation and capability evidence. Missing facts remain unknown; model-name guesses and operator limits no longer masquerade as provider evidence.
+- Remove invented quota-domain groupings based only on deployment names, which can repeat across unrelated resources.
+- Preserve distinct deployments of a shared base model, deduplicate identical records, and reject contradictory duplicate records instead of silently choosing capabilities.
+
+### Changed
+- Provider connection and discovery defaults live in `azure_foundry/settings.rb`.
+- OpenAI-compatible resources exposing only a base-model catalog require `provider.project_endpoint` and a project bearer credential or explicit project broker reference for deployment discovery. Data-plane credentials are not forwarded to the project API.
+- Use the native settings helper for configured instances and test broker integration against the actual LegionIO host lease service.
+- Updated provider documentation to describe registry snapshot reads and the actual discovery actor and runner.
+- Remove the custom completion/streaming/embedding funnel and legacy capability-name guesses. Inherit shared provider execution and preserve thinking, schemas, headers, and sampling controls through the standard callable contract; regression tests reproduce the previously dropped controls.
+- Remove top-level/flat configuration aliases, model-object coercion, resource-catalog fallback, alternate catalog envelopes, and model-family guesses. Use the shared default merge/deep copy, explicit named-instance configuration, and documented Azure response fields.
+
 ## [0.4.2] - 2026-08-25
 
 ### Fixed

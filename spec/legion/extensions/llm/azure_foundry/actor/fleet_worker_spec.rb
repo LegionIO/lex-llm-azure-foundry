@@ -2,22 +2,17 @@
 
 require 'spec_helper'
 
-module Legion
-  module Extensions
-    module Actors
-      unless const_defined?(:Subscription, false)
-        class Subscription
-          def initialize(*) = true
-        end
-      end
-    end
-  end
-end
-
 require 'legion/extensions/llm/azure_foundry/actors/fleet_worker'
 
 RSpec.describe Legion::Extensions::Llm::AzureFoundry::Actor::FleetWorker do
-  subject(:actor) { described_class.new }
+  # These routing methods need no AMQP consumer initialization.
+  subject(:actor) { described_class.allocate }
+
+  it 'inherits the actual host subscription lifecycle' do
+    expect(described_class.superclass).to eq(Legion::Extensions::Actors::Subscription)
+    expect(actor.method(:initialize).owner).to eq(Legion::Extensions::Actors::Subscription)
+    expect(actor.method(:prepare).owner).to eq(Legion::Extensions::Actors::Subscription)
+  end
 
   # D13: the Subscription dispatch path (use_runner? == false) calls
   # runner_class.send(runner_function, **message) — runner_class must be the

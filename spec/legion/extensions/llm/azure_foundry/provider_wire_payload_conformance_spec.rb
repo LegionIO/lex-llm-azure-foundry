@@ -19,27 +19,55 @@ class AzureFoundryWireRequestStub
   attr_reader :options
 end
 
-# Real callable boundary (09 §5.1): the production Helpers::Callable +
-# production AzureFoundry::Provider traverse render_payload,
+# Real provider boundary (09 §5.1): AzureFoundry::Provider traverses render_payload,
 # parse_completion_response, and stream_response; only the HTTP connection is
 # stubbed (sync bodies and SSE events at the wire edge).
-RSpec.describe Legion::Extensions::Llm::AzureFoundry::Helpers::Callable do
+RSpec.describe Legion::Extensions::Llm::AzureFoundry::Provider do
   let(:instance_cfg) do
     { azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
-      azure_foundry_api_key: 'ak-wire-spec', azure_foundry_surface: :model_inference }
+      azure_foundry_api_key: 'ak-wire-spec', azure_foundry_surface: :model_inference,
+      azure_foundry_api_version: '2024-05-01-preview' }
   end
   let(:provider) do
-    Legion::Extensions::Llm::AzureFoundry::Provider.new(
-      azure_foundry_endpoint: 'https://eastus.services.ai.azure.com',
-      azure_foundry_api_key: 'ak-wire-spec',
-      azure_foundry_surface: :model_inference
-    )
+    described_class.new(instance_cfg)
   end
-  let(:callable) do
-    described_class.new(instance_cfg: instance_cfg, logger: Logger.new(File::NULL), provider:)
-  end
+  let(:callable) { provider }
+  let(:captured) { {} }
 
   before { stub_wire_edge }
+
+  %i[chat stream_chat].each do |operation|
+    it "preserves named controls through the shared #{operation} funnel" do
+      thinking = Legion::Extensions::Llm::Canonical::Thinking::Config.build(effort: 'high')
+      schema = { name: 'answer', schema: { type: 'object', properties: { answer: { type: 'string' } } } }
+      messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')]
+      params = Legion::Extensions::Llm::Canonical::Params.build(temperature: 0.2, max_tokens: 256)
+
+      callable.public_send(operation, messages, model: 'deployment', thinking: thinking, schema: schema,
+                                                headers: { 'X-Request-Probe' => 'kept' }, params: params) do |chunk|
+        captured[:chunk] = chunk
+      end
+
+      expect(captured[:payload]).to include(
+        reasoning_effort: 'high', temperature: 0.2, max_tokens: 256,
+        response_format: { type: 'json_schema', json_schema: schema }
+      )
+      expect(captured[:headers]).to include('X-Request-Probe' => 'kept')
+    end
+  end
+
+  it 'does not interpret flat sampling kwargs as an alternate parameter contract' do
+    messages = [Legion::Extensions::Llm::Canonical::Message.build(role: :user, content: 'hello')]
+
+    expect { callable.chat(messages, model: 'deployment', temperature: 0.2) }
+      .to raise_error(ArgumentError, /temperature/)
+  end
+
+  it 'inherits completion and embedding execution from the shared provider' do
+    %i[chat stream_chat complete embed health discover_offerings].each do |operation|
+      expect(provider.method(operation).owner).to eq(Legion::Extensions::Llm::Provider)
+    end
+  end
 
   it 'renders a folded leading system message in the OpenAI-dialect wire payload' do
     captured_payload = nil
@@ -74,13 +102,19 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Helpers::Callable do
   # and feeds SSE through it; the sync path only merges headers. The stub
   # distinguishes the two by whether on_data was installed.
   def stub_wire_edge
-    allow(provider.connection).to receive(:post) do |_url, _payload, &block|
+    allow(provider.connection).to receive(:post) do |_url, payload, &block|
+      captured[:payload] = payload
       request = AzureFoundryWireRequestStub.new
       block&.call(request)
-      on_data = request.options.on_data
-      sse_events.each { |event| on_data.call(event, nil, nil) } if on_data
+      captured[:headers] = request.headers
+      emit_stub_stream(request)
       Struct.new(:body).new(sync_body)
     end
+  end
+
+  def emit_stub_stream(request)
+    on_data = request.options.on_data
+    sse_events.each { |event| on_data.call(event, nil, nil) } if on_data
   end
 
   def sync_body
