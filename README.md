@@ -10,7 +10,7 @@ pipeline, and inventory registry.
 gem 'lex-llm-azure-foundry'
 ```
 
-Ruby 3.4+ and `lex-llm >= 0.8.10` are required. LegionIO loads the extension and
+Ruby 3.4+ and `lex-llm >= 0.8.11` are required. LegionIO loads the extension and
 runs its discovery actor. The adapter implements chat, streamed chat, and text
 embeddings; a model is eligible only when its published evidence supports the
 requested operation and capabilities.
@@ -174,6 +174,7 @@ identity fields remain declarations in metadata and never become observed revisi
 | --- | --- | --- | --- | --- | --- |
 | `gpt-4o-mini` | `2024-07-18` | `GlobalStandard` | 128,000 | 16,384 | Unsupported |
 | `gpt-4.1` | `2025-04-14` | `GlobalStandard` | 1,047,576 | 32,768 | Unsupported |
+| `gpt-5-mini` | `2025-08-07` | `GlobalStandard` | 400,000 | 128,000 | Supported |
 
 The same exact tuples document chat, streaming, tools, and vision support.
 The GPT-4.1 GlobalStandard facts do not apply to regional Standard, provisioned,
@@ -181,11 +182,27 @@ batch, or unknown SKUs. Sources: [Microsoft model capability tables](https://lea
 [deployment types](https://learn.microsoft.com/en-us/azure/foundry/foundry-models/concepts/deployment-types),
 and [Azure GPT-4.1 launch](https://azure.microsoft.com/en-us/blog/announcing-the-gpt-4-1-model-series-for-azure-ai-foundry-developers/).
 
-The two exact tuples publish unsupported thinking evidence with `model_metadata`
+The two GPT-4 tuples publish unsupported thinking evidence with `model_metadata`
 provenance. [OpenAI identifies GPT-4.1 as non-reasoning](https://developers.openai.com/api/docs/models/gpt-4.1),
 and [Microsoft's Azure migration guidance identifies GPT-4o-mini as not supporting the reasoning parameter](https://github.com/Azure-Samples/azure-openai-to-responses/blob/main/skills/azure-openai-to-responses/references/troubleshooting.md#L59).
 Explicit live catalog values retain precedence, including positive reasoning or
 thinking evidence. Other model names, versions, and SKUs do not inherit this negative fact.
+
+## Native request controls
+
+The shared payload builder keeps `Canonical::Params.max_tokens` unchanged and uses
+the provider's protocol hook to choose its wire name: `max_completion_tokens` for
+OpenAI v1, or `max_tokens` for model inference. It sends only that key, and omits
+an absent limit. This applies equally to buffered and streaming requests.
+
+Native reasoning effort values remain model- and API-specific. For GPT-5 mini,
+the canonical `low`, `medium`, and `high` levels are supported; `max` is unsupported
+on Chat Completions. Azure also documents a native `minimal` level, which the
+canonical effort enum does not currently represent.
+The canonical budget conversion maps 16,384 tokens to `high`, while budgets above
+24,576 resolve to `max`. This adapter does not silently lower an unsupported effort.
+Callers must supply controls supported by their selected deployment and API.
+See [Azure reasoning API constraints](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/reasoning#api-and-feature-support).
 
 ## Evidence and failure behavior
 

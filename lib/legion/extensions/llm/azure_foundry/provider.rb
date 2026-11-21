@@ -25,6 +25,10 @@ module Legion
             %w[gpt-4.1 2025-04-14 GlobalStandard].freeze => {
               context_window: 1_047_576, max_output_tokens: 32_768,
               capabilities: { completion: true, streaming: true, tools: true, vision: true, thinking: false }.freeze
+            }.freeze,
+            %w[gpt-5-mini 2025-08-07 GlobalStandard].freeze => {
+              context_window: 400_000, max_output_tokens: 128_000,
+              capabilities: { completion: true, streaming: true, tools: true, vision: true, thinking: true }.freeze
             }.freeze
           }.freeze
 
@@ -45,6 +49,10 @@ module Legion
 
           def stream_usage_supported? = true
           def api_base = azure_endpoint.base_url
+
+          def output_token_limit_key
+            azure_endpoint.surface == :openai_v1 ? :max_completion_tokens : super
+          end
 
           def headers
             identity_headers.merge(Legion::Extensions::Llm::AzureFoundry::Authentication.headers(

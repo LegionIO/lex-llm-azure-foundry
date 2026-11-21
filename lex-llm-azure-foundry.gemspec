@@ -27,6 +27,6 @@ Gem::Specification.new do |spec|
   spec.add_dependency 'legion-logging', '>= 1.3.2'
   spec.add_dependency 'legion-settings', '>= 1.4.2'
   spec.add_dependency 'legion-transport', '>= 1.4.14'
-  # Shared fleet control rehydration and OpenAI-compatible streaming finish reasons.
-  spec.add_dependency 'lex-llm', '>= 0.8.10'
+  # Shared canonical execution and protocol-specific output-token key hook.
+  spec.add_dependency 'lex-llm', '>= 0.8.11'
 end

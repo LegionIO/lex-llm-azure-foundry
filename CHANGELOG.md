@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.8] - 2026-11-20
+
+### Fixed
+- Use the shared `output_token_limit_key` protocol hook to render OpenAI v1 output allowances as `max_completion_tokens`; keep model-inference allowances as `max_tokens`. Preserve the canonical budget unchanged, emit only one native key, and omit absent limits in buffered and streaming requests.
+- Publish documented GPT-5-mini 2025-08-07 GlobalStandard metadata: 400,000-token context, 128,000-token output allowance, and reasoning/tool/vision/streaming support. Explicit live facts retain precedence and unknown versions remain unknown.
+- Require `lex-llm >= 0.8.11` for the shared output-token key hook. Native reasoning effort values remain unchanged; unsupported effort values are not silently reduced.
+
 ## [0.4.7] - 2026-11-20
 
 ### Fixed

@@ -81,7 +81,7 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
     stubs.post('https://resource.example/openai/v1/chat/completions') do |env|
       payload = Legion::JSON.load(env.body)
       expect(env.request_headers['api-key']).to eq('resource-key')
-      expect(payload).to include(model: 'chat-slot', max_tokens: 512, reasoning_effort: 'high')
+      expect(payload).to include(model: 'chat-slot', max_completion_tokens: 512, reasoning_effort: 'high')
       expect(payload[:messages]).to eq([{ role: 'system', content: 'Be precise' },
                                         { role: 'user', content: 'Look up status' }])
       expect(payload[:tools].first[:function][:name]).to eq('lookup')
@@ -321,6 +321,47 @@ RSpec.describe Legion::Extensions::Llm::AzureFoundry::Runners::Discovery do
 
     expect { described_class.fetch_raw_models(instance_cfg: config) }
       .to raise_error(Legion::Extensions::Llm::ConfigurationError, /discovery_source/)
+  end
+
+  context 'with the documented GPT-5 mini reasoning tuple' do
+    let(:bindings) do
+      [{ name: 'reasoning-slot', model: 'gpt-5-mini', model_version: '2025-08-07', deployment_type: 'GlobalStandard' }]
+    end
+    let(:catalog) { [{ id: 'gpt-5-mini', capabilities: { chat_completion: true } }] }
+
+    before { stubs.get(resource_url) { response(data: catalog) } }
+
+    it 'publishes the exact documented reasoning model limits and capabilities' do
+      described_class.refresh
+
+      lane = registry.snapshot.each_lane.first
+      expect(lane.model).to eq('reasoning-slot')
+      expect(lane.context_evidence.to_h).to include(value: 400_000, source: :model_metadata)
+      expect(lane.max_output_evidence.to_h).to include(value: 128_000, source: :model_metadata)
+      %i[thinking tools vision streaming].each do |capability|
+        expect(lane.capability_evidence[capability].to_h).to include(status: :supported, source: :model_metadata)
+      end
+    end
+
+    it 'preserves explicit live reasoning and tool negatives over vendor support' do
+      catalog.first[:capabilities].merge!(reasoning: false, function_calling: false)
+
+      described_class.refresh
+
+      lane = registry.snapshot.each_lane.first
+      expect(lane.capability_evidence[:thinking].to_h).to include(status: :unsupported, source: :provider_catalog)
+      expect(lane.capability_evidence[:tools].to_h).to include(status: :unsupported, source: :provider_catalog)
+    end
+
+    it 'keeps an unknown reasoning model version unconfirmed' do
+      tree[:instances][:primary][:provider][:deployments].first[:model_version] = 'unknown'
+
+      described_class.refresh
+
+      lane = registry.snapshot.each_lane.first
+      expect(lane.context_evidence.status).to eq(:unknown)
+      expect(lane.capability_evidence[:thinking].status).to eq(:unknown)
+    end
   end
 
   context 'with an exact documented model version and deployment type' do
